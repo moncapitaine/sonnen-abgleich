@@ -843,65 +843,99 @@ function viewCost() {
   if (!c.tariffs.length || !c.proposal) { out.push(contract); return out; }
 
   // proposal
-  const p = c.proposal;
+  const p = c.proposal, fac = c.factor, phone = narrow();
+  const hasReadings = c.months.some(m => m.known_kwh > 0);
   const stat = (k, v, unit, note) => h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v, unit && h('small', {}, unit)), note && h('div', { class: 'n' }, note));
-  out.push(card('Vorschlag für den Stromanbieter', 'Auf Grundlage des Netzbezugs der letzten zwölf Monate.',
+  const pctMore = fac ? (fac.value - 1) * 100 : 0;
+  out.push(card('Vorschlag für den Stromanbieter', 'Für ein Jahr mit normal laufender Anlage' + (fac ? ', so wie der offizielle Zähler es zählt.' : ', auf Grundlage der sonnen-Daten.'),
     h('div', { class: 'hero' },
       stat('Jahresverbrauch melden', n0.format(p.annual_kwh_rounded), 'kWh pro Jahr', `im Schnitt ${n0.format(p.monthly_kwh)} kWh pro Monat`),
       stat('Passender Abschlag', n0.format(p.monthly_payment), '€ pro Monat', `${eur(p.yearly_cost, 0)} im Jahr`)),
     h('p', { class: 'prose' }, `Vom ${dDE(p.from)} bis ${dDE(p.to)} hat sonnen ${n0.format(p.recorded_kwh)} kWh Netzbezug aufgezeichnet`
       + (p.filled_kwh > 0.5 ? `. Für ${n1.format(p.missing_days)} Tage ohne Aufzeichnung sind ${n0.format(p.filled_kwh)} kWh ergänzt (Werte: ${p.reference}, Anlage im Normalbetrieb)` : '')
       + (p.extrapolated ? `. Das sind erst ${p.days} Tage; der Wert ist auf ein ganzes Jahr hochgerechnet` : '')
-      + `. Das ergibt ${n0.format(p.annual_kwh)} kWh im Jahr, aufgerundet ${n0.format(p.annual_kwh_rounded)} kWh.`),
+      + `. Das ergibt ${n0.format(p.sonnen_normal_kwh)} kWh im Jahr.`),
+    fac ? h('p', { class: 'prose' }, `Der Stromanbieter rechnet aber nach dem offiziellen Zähler ab, und der zählt ${pctMore >= 0 ? 'mehr' : 'weniger'} als sonnen: in ${n0.format(fac.days)} Tagen mit vollständiger sonnen-Aufzeichnung ${n0.format(fac.meter_kwh)} kWh gegen ${n0.format(fac.sonnen_kwh)} kWh, also ${pctMore >= 0 ? '+' : ''}${n1.format(pctMore)} %. `
+        + `Damit werden aus ${n0.format(p.sonnen_normal_kwh)} kWh ${n0.format(p.annual_kwh)} kWh, aufgerundet ${n0.format(p.annual_kwh_rounded)} kWh.`)
+      : h('p', { class: 'prose' }, 'Dieser Vorschlag beruht nur auf den sonnen-Daten. Sobald Zählerstände über mindestens 60 Tage mit vollständiger sonnen-Aufzeichnung eingetragen sind, wird er an den offiziellen Zähler angeglichen – der Anbieter rechnet nach dem Zähler ab.'),
     h('p', { class: 'prose' }, `Abschlag = (12 × ${eur(p.base_eur_month)} Grundpreis + ${n0.format(p.annual_kwh_rounded)} kWh × ${nf(2).format(p.price_ct_kwh)} ct) ÷ 12, auf volle Euro aufgerundet.`),
-    p.missing_days > 5 && h('div', { class: 'notice', style: 'margin-top:12px' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '!'),
-      h('p', {}, 'Der Vorschlag gilt für eine Anlage, die normal läuft. In der Zeit ohne Aufzeichnung war der tatsächliche Bezug vermutlich höher als hier angesetzt – die Jahresabrechnung für diesen Zeitraum kann deshalb eine Nachzahlung bringen, auch wenn der Abschlag künftig passt.'))));
+    p.actual.known_days >= 30 && h('div', { style: 'margin-top:16px;padding-top:14px;border-top:1px solid var(--grid)' },
+      h('h3', { style: 'margin-bottom:8px' }, 'Zum Vergleich: tatsächlicher Verbrauch laut Zähler'),
+      h('div', { class: 'stats' },
+        stat('In diesen zwölf Monaten', n0.format(p.actual.kwh), 'kWh', `${n0.format(p.actual.known_days)} von ${p.days} Tagen durch Ablesungen belegt`),
+        stat('Das entspräche', n0.format(p.actual.monthly_payment), '€ pro Monat', `bei gemeldeten ${n0.format(p.actual.kwh_rounded)} kWh`)),
+      h('p', { class: 'prose' }, 'Das ist, was der Zähler wirklich gezählt hat' + (p.actual.known_days < p.days - 1 ? '; Tage ohne Ablesung sind aus den sonnen-Daten geschätzt' : '')
+        + (p.missing_days > 5 ? '. Der Wert enthält die Zeit, in der sonnen nichts aufgezeichnet hat – war das ein Ausfall des Speichers, lag der Verbrauch dadurch höher als in einem normalen Jahr. Die Jahresabrechnung für diesen Zeitraum richtet sich nach diesem Wert.' : '.')))));
 
-  // monthly cost
-  const M = c.months;
+  // monthly cost, as billed
+  const all = c.months, M = all.slice(-24);
+  const share = m => (m.kwh > 0 ? m.known_kwh / m.kwh : m.known_days / Math.max(1, m.days));
   const B = M.map(m => ({
     label: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(2, 4)}`, title: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(0, 4)}` + (m.complete ? '' : ' (angebrochen)'),
-    n: m.days, missing: m.missing_days,
+    n: m.days, missing: 0, sonnen: m.sonnen_days > 0 ? m.sonnen_eur : null,
   }));
   const el = h('div', { class: 'chart tall' });
-  const o = baseOpt();
+  const o = baseOpt(hasReadings);
+  const fade = (m, v) => (m.complete ? v : { value: v, itemStyle: { opacity: 0.45 } });
   o.xAxis = axCat(B.map(b => b.label)); o.yAxis = axVal('€');
-  o.tooltip.formatter = tip(B, '€', 'zusammen');
-  o.series = [
-    { ...barSeries('Kosten laut Aufzeichnung', C.grid, M.map(m => (m.complete ? m.total_eur : { value: m.total_eur, itemStyle: { opacity: 0.45 } })), 's'),
-      markLine: { silent: true, symbol: 'none', lineStyle: { color: C.text2, width: 1.5, type: 'solid' },
-        label: { formatter: `Abschlag ${n0.format(p.monthly_payment)} €`, position: 'insideEndTop', color: C.text, fontSize: 11 }, data: [{ yAxis: p.monthly_payment }] } },
-    barSeries('Schätzung für Zeit ohne Daten', C.est, M.map(m => (m.missing_days > 0.05 ? m.est_eur[1] : 0)), 's', true),
-  ];
-  out.push(card('Stromkosten pro Monat', 'Grundpreis plus Netzbezug mal Arbeitspreis. Im Winter liegen die Kosten über dem Abschlag, im Sommer darunter – übers Jahr gleicht es sich aus.', el,
-    h('div', { class: 'legendline' }, h('span', {}, 'Grau: geschätzte Kosten für Zeit ohne Aufzeichnung (Annahme: Speicher aus, PV-Anlage lief). Blass: angebrochener Monat.'))));
+  o.tooltip.formatter = params => tip(B, '€', hasReadings ? 'zusammen' : null)(params)
+    + (hasReadings && B[params[0].dataIndex].sonnen != null ? `<div style="color:${C.muted};margin-top:4px">nur nach sonnen-Daten: ${nf(2).format(B[params[0].dataIndex].sonnen)} €</div>` : '');
+  const line = { silent: true, symbol: 'none', lineStyle: { color: C.text2, width: 1.5, type: 'solid' },
+    label: { formatter: `Abschlag ${n0.format(p.monthly_payment)} €`, position: 'insideEndTop', color: C.text, fontSize: 11 }, data: [{ yAxis: p.monthly_payment }] };
+  o.series = hasReadings ? [
+    { ...barSeries('durch Zählerablesung belegt', C.meter, M.map(m => fade(m, m.total_eur * share(m))), 's'), markLine: line },
+    barSeries('geschätzt (keine Ablesung)', C.est, M.map(m => fade(m, m.total_eur * (1 - share(m)))), 's', true),
+  ] : [{ ...barSeries('Kosten', C.grid, M.map(m => fade(m, m.total_eur)), 's', true), markLine: line }];
+  out.push(card('Stromkosten pro Monat', (hasReadings ? 'So wie der offizielle Zähler zählt: ' : '') + 'Grundpreis plus Verbrauch mal Arbeitspreis. Im Winter liegen die Kosten über dem Abschlag, im Sommer darunter – übers Jahr gleicht es sich aus.', el,
+    h('div', { class: 'legendline' },
+      hasReadings && h('span', {}, 'Zwischen zwei Ablesungen ist der Verbrauch genau bekannt und wird nach dem Verlauf der sonnen-Daten auf die Tage verteilt.'),
+      !hasReadings && all.some(m => m.sonnen_missing_days > 0.5) && h('span', {}, 'Für Zeit ohne sonnen-Aufzeichnung ist ein Schätzwert enthalten (Annahme: Speicher aus, PV-Anlage lief).'),
+      M.some(m => !m.complete) && h('span', {}, 'Blass: angebrochener Monat.'))));
   queueMicrotask(() => draw(el, o));
 
   const diff = v => (v > 0 ? '+' : '') + nf(2).format(v) + ' €';
-  const gapNote = x => `${n1.format(x.missing_days)} Tage ohne Daten: zusätzlich etwa ${eur(x.est_eur[0], 0)} – ${eur(x.est_eur[2], 0)}`;
-  const phone = narrow();   // a phone gets the four columns that matter; the notes move below the table
+  const basis = x => {
+    const f = x.known_days / Math.max(1, x.days);
+    return (f >= 0.98 ? 'Zählerablesung' : f > 0.02 ? `${n0.format(x.known_days)} von ${x.days} Tagen abgelesen, Rest geschätzt` : hasReadings ? 'geschätzt aus sonnen-Daten' : 'sonnen-Daten')
+      + (x.sonnen_missing_days > 0.5 ? ` · ${n1.format(x.sonnen_missing_days)} Tage ohne sonnen-Daten` : '');
+  };
+  const label = m => `${MONTHS[+m.month.slice(5) - 1]} ${phone ? m.month.slice(2, 4) : m.month.slice(0, 4)}` + (m.complete ? '' : phone ? ' *' : ' (angebrochen)');
   const mCols = [
-    ['Monat', (m, b) => (phone ? b.label + (m.complete ? '' : ' *') : b.title)], ['Netzbezug', m => n0.format(m.kwh) + ' kWh'],
-    !phone && ['Arbeitspreis', m => eur(m.energy_eur)], !phone && ['Grundpreis', m => eur(m.base_eur)],
-    ['Kosten', m => h('strong', {}, eur(m.total_eur))],
-    [phone ? '± Abschlag' : 'zum Abschlag', m => (m.missing_days >= 0.5 ? (phone ? 'Lücke' : '–') : m.complete ? diff(m.total_eur - p.monthly_payment) : '–')],
-    !phone && ['Hinweis', m => (m.missing_days > 0.05 ? gapNote(m) : ''), 'l'],
-  ].filter(Boolean);
-  const yNote = y => [y.months < 11.95 && `${n1.format(y.months)} Monate erfasst`, y.missing_days > 0.05 && gapNote(y)].filter(Boolean).join(' · ');
-  const yCols = [
-    ['Jahr', y => y.year], ['Netzbezug', y => n0.format(y.kwh) + ' kWh'], ['Kosten', y => h('strong', {}, eur(y.total_eur))],
-    ['pro Monat', y => eur(y.total_eur / Math.max(0.1, y.months))], !phone && ['Hinweis', yNote, 'l'],
+    ['Monat', label], ['Verbrauch', m => n0.format(m.kwh) + ' kWh'], ['Kosten', m => h('strong', {}, eur(m.total_eur))],
+    [phone ? '± Abschlag' : 'zum Abschlag', m => (m.complete ? diff(m.total_eur - p.monthly_payment) : '–')],
+    !phone && hasReadings && ['nur nach sonnen', m => (m.sonnen_days > 0 ? n0.format(m.sonnen_kwh) + ' kWh' : '–')],
+    !phone && ['Grundlage', basis, 'l'],
   ].filter(Boolean);
   const table = (cols, rows) => h('table', {},
     h('thead', {}, h('tr', {}, cols.map(([t, , cls]) => h('th', { class: cls }, t)))),
-    h('tbody', {}, rows.map(r => h('tr', {}, cols.map(([, f, cls]) => h('td', { class: cls }, f(...r)))))));
+    h('tbody', {}, rows.map(r => h('tr', {}, cols.map(([, f, cls]) => h('td', { class: cls }, f(r)))))));
   out.push(card('Kosten je Monat', (phone ? '„± Abschlag“' : '„Zum Abschlag“') + ': Kosten des Monats minus vorgeschlagener Abschlag. Positiv heißt, der Monat war teurer als der Abschlag.',
-    h('div', { class: 'tablewrap scrolly' }, table(mCols, [...M].map((m, k) => [m, B[k]]).reverse())),
-    phone && h('div', { class: 'legendline' }, M.some(m => !m.complete) && h('span', {}, '* angebrochener Monat'),
-      M.some(m => m.missing_days >= 0.5) && h('span', {}, '„Lücke“: In diesem Monat hat sonnen zeitweise nichts aufgezeichnet; die Kosten waren höher als angezeigt.')),
-    h('h3', { style: 'margin:18px 0 6px' }, 'Je Kalenderjahr'),
-    h('div', { class: 'tablewrap' }, table(yCols, [...c.years].reverse().map(y => [y]))),
-    phone && h('div', { class: 'legendline' }, [...c.years].reverse().filter(yNote).map(y => h('span', {}, `${y.year}: ${yNote(y)}`)))));
+    h('div', { class: 'tablewrap scrolly' }, table(mCols, [...all].reverse())),
+    phone && all.some(m => !m.complete) && h('div', { class: 'legendline' }, h('span', {}, '* angebrochener Monat'))));
+
+  // optional: the past years, meter against sonnen
+  const dev = y => {
+    if (!(y.sonnen_days > 0) || !hasReadings) return '–';
+    const d = y.kwh_sonnen_days - y.sonnen_kwh;
+    return `${d > 0 ? '+' : ''}${n0.format(d)} kWh` + (y.sonnen_kwh > 0 ? ` (${d > 0 ? '+' : ''}${n0.format(100 * d / y.sonnen_kwh)} %)` : '');
+  };
+  const yCols = [
+    ['Jahr', y => y.year + (y.months < 11.95 ? ' *' : '')],
+    [hasReadings ? 'laut Zähler' : 'Verbrauch', y => n0.format(y.kwh) + ' kWh'],
+    hasReadings && ['nur nach sonnen', y => (y.sonnen_days > 0 ? n0.format(y.sonnen_kwh) + ' kWh' : '–')],
+    hasReadings && ['Zähler mehr als sonnen', dev],
+    [hasReadings ? 'Kosten laut Zähler' : 'Kosten', y => h('strong', {}, eur(y.total_eur))],
+    hasReadings && ['Kosten nur nach sonnen', y => (y.sonnen_days > 0 ? eur(y.sonnen_eur) : '–')],
+    ['pro Monat', y => eur(y.total_eur / Math.max(0.1, y.months))],
+    ['Grundlage', y => (y.months < 11.95 ? `${n1.format(y.months)} Monate erfasst · ` : '') + basis(y), 'l'],
+  ].filter(Boolean);
+  out.push(h('section', { class: 'card' }, h('details', { open: S.yearsOpen || null, ontoggle: e => { S.yearsOpen = e.target.open; } },
+    h('summary', {}, h('h2', {}, 'Vergleich der vergangenen Jahre'), h('p', { class: 'sub' }, hasReadings ? 'Verbrauch und Kosten je Kalenderjahr: offizieller Zähler gegen sonnen. Antippen zum Aufklappen.' : 'Verbrauch und Kosten je Kalenderjahr. Antippen zum Aufklappen.')),
+    h('div', { class: 'tablewrap', style: 'margin-top:12px' }, table(yCols, [...c.years].reverse())),
+    h('div', { class: 'legendline' },
+      c.years.some(y => y.months < 11.95) && h('span', {}, '* Jahr nur teilweise erfasst.'),
+      hasReadings && h('span', {}, '„Zähler mehr als sonnen“ vergleicht nur die Tage, für die es sonnen-Daten geben müsste. Tage ohne sonnen-Aufzeichnung zählen dort voll als Abweichung.'),
+      hasReadings && h('span', {}, 'Mit der Jahresabrechnung des Anbieters lässt sich „laut Zähler“ direkt vergleichen.')))));
   out.push(contract);
   return out;
 }

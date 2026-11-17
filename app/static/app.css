@@ -251,3 +251,10 @@ table.mini td:first-child { color: var(--text-2); padding-left: 0; }
 .prose { color: var(--text-2); font-size: 13px; max-width: 75ch; text-wrap: pretty; }
 .prose + .prose { margin-top: 6px; }
 @media (max-width: 640px) { .hero { gap: 12px 28px; } .hero .stat .v { font-size: 25px; } }
+
+details > summary { cursor: pointer; list-style: none; position: relative; padding-right: 28px; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::after { content: ""; position: absolute; right: 4px; top: 6px; width: 9px; height: 9px;
+  border-right: 2px solid var(--text-2); border-bottom: 2px solid var(--text-2); transform: rotate(45deg); transition: transform .15s; }
+details[open] > summary::after { transform: rotate(225deg); top: 10px; }
+details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 6px; }

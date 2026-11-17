@@ -391,6 +391,78 @@ def comparison(conn, ds: Dataset) -> dict:
 
 # ---- cost of the grid purchase -------------------------------------------------------
 
+def _billed_days(conn, ds: Dataset) -> tuple[dict, dict | None]:
+    """Grid purchase per local day as the official meter counted it, in kWh.
+
+    The provider bills by the meter, not by sonnen. Between two readings of a meter the
+    counted energy is known exactly; it is spread over the days in between in proportion
+    to what sonnen recorded (plus the estimate for time without sonnen data), so months
+    and years get their fair share. Days no reading covers are estimated from sonnen,
+    scaled by how much more the meter counts than sonnen where both are complete.
+
+    Returns ({day: {"known", "est", "known_frac"}}, factor info or None).
+    """
+    intervals = []
+    for m in conn.execute("SELECT id FROM meters ORDER BY id").fetchall():
+        rs = conn.execute("SELECT taken_at, import_kwh FROM readings WHERE meter_id=? ORDER BY taken_at",
+                          (m["id"],)).fetchall()
+        intervals += [(a["taken_at"], b["taken_at"], b["import_kwh"] - a["import_kwh"])
+                      for a, b in zip(rs, rs[1:]) if b["taken_at"] > a["taken_at"]]
+
+    # How much more (or less) the meter counts than sonnen, from periods sonnen recorded completely.
+    meter_sum = sonnen_sum = span = 0.0
+    for t1, t2, delta in intervals:
+        e = ds.between(t1, t2)
+        if e["missing_days"] <= 0.02 and e["purchase"] > 0:
+            meter_sum += delta
+            sonnen_sum += e["purchase"] / 1000
+            span += (t2 - t1) / 86400
+    factor = None
+    if span >= 60 and sonnen_sum >= 100 and 0.5 < meter_sum / sonnen_sum < 2:
+        factor = {"value": meter_sum / sonnen_sum, "days": round(span, 1),
+                  "meter_kwh": round(meter_sum, 1), "sonnen_kwh": round(sonnen_sum, 1)}
+    scale = factor["value"] if factor else 1.0
+
+    def weight(a: int, b: int) -> float:   # expected grid purchase of a stretch of time, kWh
+        e = ds.between(a, b)
+        return (e["purchase"] + e["imp_mid"]) / 1000
+
+    known: dict[date, float] = {}
+    known_w: dict[date, float] = {}
+    known_secs: dict[date, int] = {}
+    for t1, t2, delta in intervals:
+        parts, d, last = [], local_date(t1), local_date(t2 - 1)
+        while d <= last:
+            start, end = day_bounds(d)
+            a, b = max(t1, start), min(t2, end)
+            if b > a:
+                parts.append((d, b - a, weight(a, b)))
+            d += timedelta(days=1)
+        total = sum(w for _, _, w in parts)
+        for d, secs, w in parts:
+            share = w / total if total > 0 else secs / (t2 - t1)
+            known[d] = known.get(d, 0.0) + delta * share
+            known_w[d] = known_w.get(d, 0.0) + w
+            known_secs[d] = known_secs.get(d, 0) + secs
+
+    days: dict[date, dict] = {}
+    if not ds.first_day:
+        return days, factor
+    d = min([ds.first_day] + [local_date(t1) for t1, _, _ in intervals])
+    while d <= ds.last_day:
+        start, end = day_bounds(d)
+        if d == ds.last_day and ds.data_end:
+            end = min(end, ds.data_end)
+        length = max(1, end - start)
+        covered = min(length, known_secs.get(d, 0))
+        est = 0.0
+        if d >= ds.first_day and covered < length - 60:
+            est = max(0.0, weight(start, end) - known_w.get(d, 0.0)) * scale
+        days[d] = {"known": known.get(d, 0.0), "est": est, "known_frac": covered / length}
+        d += timedelta(days=1)
+    return days, factor
+
+
 def costs(conn, ds: Dataset) -> dict:
     """Monthly cost of the grid purchase and a proposal for the monthly advance payment.
 
@@ -399,7 +471,7 @@ def costs(conn, ds: Dataset) -> dict:
     twelve equal advance payments ("Abschlag") from it.
     """
     tariffs = [dict(r) for r in conn.execute("SELECT * FROM tariffs ORDER BY valid_from")]
-    out = {"tariffs": tariffs, "months": [], "years": [], "proposal": None}
+    out = {"tariffs": tariffs, "months": [], "years": [], "proposal": None, "factor": None}
     if not tariffs or not ds.first_day:
         return out
 
@@ -410,73 +482,94 @@ def costs(conn, ds: Dataset) -> dict:
                 chosen = t
         return chosen
 
+    billed, factor = _billed_days(conn, ds)
+    out["factor"] = factor and {**factor, "value": round(factor["value"], 4)}
+
+    def blank(key: str, name: str) -> dict:
+        return {name: key, "days": 0, "kwh": 0.0, "known_kwh": 0.0, "est_kwh": 0.0, "known_days": 0.0,
+                "energy_eur": 0.0, "base_eur": 0.0, "sonnen_kwh": 0.0, "sonnen_eur": 0.0,
+                "sonnen_days": 0.0, "sonnen_missing_days": 0.0, "kwh_sonnen_days": 0.0}
+
     months: dict[str, dict] = {}
-    for d in ds.all_days():
+    for d, b in billed.items():
         t = tariff_for(d)
-        m = months.setdefault(d.isoformat()[:7], {
-            "month": d.isoformat()[:7], "days": 0, "kwh": 0.0, "energy_eur": 0.0, "base_eur": 0.0,
-            "missing_days": 0.0, "est_kwh": [0.0, 0.0, 0.0], "est_eur": [0.0, 0.0, 0.0], "reference": set()})
-        kwh = ds.days[d]["purchase"] / 1000 if d in ds.days else 0.0
+        price = t["price_ct_kwh"] / 100
+        base = t["base_eur_month"] / calendar.monthrange(d.year, d.month)[1]
+        m = months.setdefault(d.isoformat()[:7], blank(d.isoformat()[:7], "month"))
+        kwh = b["known"] + b["est"]
         m["days"] += 1
         m["kwh"] += kwh
-        m["energy_eur"] += kwh * t["price_ct_kwh"] / 100
-        m["base_eur"] += t["base_eur_month"] / calendar.monthrange(d.year, d.month)[1]
-        miss = 1 - ds.cov[d]
-        if miss > 0.001:
-            ref, label = ds._ref(d)
-            est = ds._estimate(ref, miss)
-            m["missing_days"] += miss
-            m["reference"].add(label)
-            for k, key in enumerate(("imp_lo", "imp_mid", "imp_hi")):
-                m["est_kwh"][k] += est[key] / 1000
-                m["est_eur"][k] += est[key] / 1000 * t["price_ct_kwh"] / 100
+        m["known_kwh"] += b["known"]
+        m["est_kwh"] += b["est"]
+        m["known_days"] += b["known_frac"]
+        m["energy_eur"] += kwh * price
+        m["base_eur"] += base
+        if d >= ds.first_day:      # what sonnen alone would say
+            son = ds.days[d]["purchase"] / 1000 if d in ds.days else 0.0
+            m["sonnen_kwh"] += son
+            m["sonnen_eur"] += son * price + base
+            m["sonnen_days"] += 1
+            m["sonnen_missing_days"] += 1 - ds.cov[d]
+            m["kwh_sonnen_days"] += kwh    # meter-side energy on the days sonnen can be compared with
+
     years: dict[str, dict] = {}
+    sums = ("days", "kwh", "known_kwh", "est_kwh", "known_days", "energy_eur", "base_eur",
+            "sonnen_kwh", "sonnen_eur", "sonnen_days", "sonnen_missing_days", "kwh_sonnen_days")
     for m in months.values():
         y, mo = int(m["month"][:4]), int(m["month"][5:])
         m["complete"] = m["days"] == calendar.monthrange(y, mo)[1]
         m["total_eur"] = m["energy_eur"] + m["base_eur"]
-        m["reference"] = ", ".join(sorted(m["reference"]))
-        yr = years.setdefault(str(y), {"year": str(y), "months": 0.0, "kwh": 0.0, "total_eur": 0.0,
-                                       "missing_days": 0.0, "est_eur": [0.0, 0.0, 0.0]})
+        yr = years.setdefault(str(y), {**blank(str(y), "year"), "months": 0.0})
         yr["months"] += m["days"] / calendar.monthrange(y, mo)[1]
-        for k in ("kwh", "total_eur", "missing_days"):
+        for k in sums:
             yr[k] += m[k]
-        yr["est_eur"] = [a + b for a, b in zip(yr["est_eur"], m["est_eur"])]
+    for yr in years.values():
+        yr["total_eur"] = yr["energy_eur"] + yr["base_eur"]
 
     def tidy(item: dict) -> dict:
-        return {k: ([round(x, 2) for x in v] if isinstance(v, list) else round(v, 2) if isinstance(v, float) else v)
-                for k, v in item.items()}
+        return {k: round(v, 2) if isinstance(v, float) else v for k, v in item.items()}
     out["months"] = [tidy(m) for m in months.values()]
     out["years"] = [tidy(y) for y in years.values()]
 
-    # Proposal: the last 365 complete days. Days without sonnen data are filled with what the
-    # same week of another year needed from the grid, i.e. the system in normal operation.
+    # Proposal from the last 365 complete days.
     end = ds.last_day - timedelta(days=1)
     start = max(ds.first_day, end - timedelta(days=364))
     if end >= start:
-        recorded = filled = missing = 0.0
+        recorded = filled = missing = actual = actual_known_days = 0.0
         labels = set()
         n = (end - start).days + 1
         for i in range(n):
             d = start + timedelta(days=i)
             recorded += ds.days[d]["purchase"] / 1000 if d in ds.days else 0.0
             miss = 1 - ds.cov[d]
-            if miss > 0.001:
+            if miss > 0.001:      # filled with the same week of another year: the system in normal operation
                 ref, label = ds._ref(d)
                 filled += miss * ref["purchase"] / 1000
                 missing += miss
                 labels.add(label)
+            actual += billed[d]["known"] + billed[d]["est"]
+            actual_known_days += billed[d]["known_frac"]
         t = tariffs[-1]   # the price that applies now
-        annual = (recorded + filled) / n * 365
-        annual_round = math.ceil(annual / 50) * 50
-        yearly_cost = 12 * t["base_eur_month"] + annual_round * t["price_ct_kwh"] / 100
+        to_year = 365 / n
+
+        def offer(kwh: float) -> dict:
+            rounded = math.ceil(kwh / 50) * 50
+            yearly = 12 * t["base_eur_month"] + rounded * t["price_ct_kwh"] / 100
+            return {"kwh": round(kwh, 1), "kwh_rounded": rounded, "monthly_kwh": round(rounded / 12, 1),
+                    "yearly_cost": round(yearly, 2), "monthly_payment": math.ceil(yearly / 12)}
+
+        sonnen_normal = (recorded + filled) * to_year
+        normal = offer(sonnen_normal * (factor["value"] if factor else 1.0))
         out["proposal"] = {
             "from": start.isoformat(), "to": end.isoformat(), "days": n, "extrapolated": n < 360,
             "recorded_kwh": round(recorded, 1), "filled_kwh": round(filled, 1), "missing_days": round(missing, 1),
-            "reference": ", ".join(sorted(labels)),
-            "annual_kwh": round(annual, 1), "annual_kwh_rounded": annual_round,
-            "monthly_kwh": round(annual_round / 12, 1),
-            "yearly_cost": round(yearly_cost, 2), "monthly_payment": math.ceil(yearly_cost / 12),
+            "reference": ", ".join(sorted(labels)), "sonnen_normal_kwh": round(sonnen_normal, 1),
+            "basis": "meter" if factor else "sonnen",
+            # what to report: a normal year, as the meter would count it
+            "annual_kwh": normal["kwh"], "annual_kwh_rounded": normal["kwh_rounded"], "monthly_kwh": normal["monthly_kwh"],
+            "yearly_cost": normal["yearly_cost"], "monthly_payment": normal["monthly_payment"],
+            # what the meter really counted in these twelve months (outages included)
+            "actual": {**offer(actual * to_year), "known_days": round(actual_known_days, 1)},
             "base_eur_month": t["base_eur_month"], "price_ct_kwh": t["price_ct_kwh"],
         }
     return out

@@ -19,9 +19,13 @@ The UI is in German (it is used by the house owner); code and docs are in Englis
   readings the app compares the meter's difference with what sonnen recorded in
   exactly that time span.
 - **Kosten**: with the contract's base price (EUR/month) and energy price (ct/kWh) the app shows
-  the cost of every month and proposes what to report to the provider: the yearly consumption of
-  the last twelve months (days without sonnen data filled from the same week of another year) and
-  the monthly advance payment that follows from it. A price change is entered with its start date.
+  the cost of every month and proposes what to report to the provider: the yearly consumption
+  and the monthly advance payment that follows from it. A price change is entered with its
+  start date. The provider bills by the official meter, so costs follow the meter readings
+  where they exist: the energy between two readings is spread over the days in proportion to
+  the sonnen data, and days without a reading are estimated from sonnen, scaled by how much
+  more the meter counts than sonnen in fully recorded periods. Without readings the page falls
+  back to sonnen alone. A collapsible table compares meter and sonnen per calendar year.
 - **Meter swaps**: every reading belongs to a meter identified by its number. A swap
   is recorded with its date, the final value of the old meter and the first value of
   the new one. Values of different devices are never subtracted from each other.

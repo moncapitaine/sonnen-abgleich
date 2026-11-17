@@ -254,3 +254,31 @@ def test_meter_can_be_marked_removed_afterwards(client):
     assert client.get("/api/comparison").json()["meters"][0]["final_estimate"] is None   # known now, nothing to estimate
     assert client.put(f"/api/meters/{old}", json=edit).status_code == 200              # and it can be put back in service
     assert client.get("/api/comparison").json()["meters"][0]["removed_local"] is None
+
+
+def test_costs_follow_the_official_meter_when_readings_exist(client):
+    """The provider bills by the meter. Here it counts 10 % more than sonnen (13.2 instead of 12 kWh/day)."""
+    load(*make_csvs(date(2025, 1, 1), 500))
+    client.post("/api/tariffs", json={"base_eur_month": 10, "price_ct_kwh": 30})
+    mid = client.post("/api/meters", json={"number": "A-1"}).json()["id"]
+    _reading(client, mid, "2025-01-01T00:00", 0)
+    _reading(client, mid, "2025-04-11T00:00", 1320)      # 100 days
+    _reading(client, mid, "2025-07-20T00:00", 2640)      # 200 days
+    c = client.get("/api/costs").json()
+
+    assert c["factor"]["value"] == pytest.approx(1.1) and c["factor"]["days"] == 200
+    june = [m for m in c["months"] if m["month"] == "2025-06"][0]      # inside the readings: exact
+    assert (june["kwh"], june["known_kwh"], june["est_kwh"], june["known_days"]) == (396, 396, 0, 30)
+    assert june["total_eur"] == pytest.approx(396 * 0.30 + 10) and june["sonnen_kwh"] == 360
+    sept = [m for m in c["months"] if m["month"] == "2025-09"][0]      # after the last reading: sonnen times 1.1
+    assert (sept["kwh"], sept["known_kwh"], sept["known_days"]) == (396, 0, 0)
+
+    y = [y for y in c["years"] if y["year"] == "2025"][0]
+    assert y["kwh"] == pytest.approx(365 * 13.2) and y["known_kwh"] == pytest.approx(2640) and y["sonnen_kwh"] == 4380
+    assert y["known_days"] == 200
+
+    p = c["proposal"]
+    assert p["basis"] == "meter" and p["sonnen_normal_kwh"] == 4380
+    assert p["annual_kwh"] == pytest.approx(4818) and p["annual_kwh_rounded"] == 4850
+    assert p["monthly_payment"] == 132                                  # (120 + 4850 * 0.30) / 12 = 131.25
+    assert p["actual"]["kwh"] == pytest.approx(4818)                    # no outage here, so the same
