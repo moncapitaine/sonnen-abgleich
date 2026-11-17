@@ -342,6 +342,18 @@ def comparison(conn, ds: Dataset) -> dict:
                 item["verdict_export"] = _verdict(item["diff_export"], item["meter_export"], e["missing_days"],
                                                   e["exp_lo"] / 1000, e["exp_hi"] / 1000)
             intervals.append(item)
+        m["final_estimate"] = None
+        if rs and m["removed_at"] and m["removed_at"] - rs[-1]["taken_at"] > 3600:
+            # Removed without a final reading: what it should have shown when it came out, going by sonnen.
+            e = ds.between(rs[-1]["taken_at"], m["removed_at"])
+            m["final_estimate"] = {
+                "at": local_iso(m["removed_at"]), "since": local_iso(rs[-1]["taken_at"]),
+                "import_kwh": round(rs[-1]["import_kwh"] + e["purchase"] / 1000, 1),
+                "export_kwh": (round(rs[-1]["export_kwh"] + e["feedin"] / 1000, 1)
+                               if rs[-1]["export_kwh"] is not None else None),
+                "missing_days": round(e["missing_days"], 1),
+                "est_import": [round(e[k] / 1000, 1) for k in ("imp_lo", "imp_mid", "imp_hi")],
+            }
         if rs:
             prev_last = {**rs[-1], "number": m["number"]}
             if m["removed_at"] is None and ds.data_end and ds.data_end > rs[-1]["taken_at"]:

@@ -232,3 +232,25 @@ def test_costs_and_advance_payment_proposal(client):
     # saving again for the same date replaces instead of adding
     client.post("/api/tariffs", json={"base_eur_month": 12, "price_ct_kwh": 35, "valid_from": "2026-01-01"})
     assert len(client.get("/api/costs").json()["tariffs"]) == 2
+
+
+def test_meter_can_be_marked_removed_afterwards(client):
+    """A second meter entered as a plain new meter leaves the first one in service until it is closed by hand."""
+    load(*make_csvs(date(2025, 6, 1), 30))
+    old = client.post("/api/meters", json={"number": "1"}).json()["id"]
+    _reading(client, old, "2025-06-05T12:00", 100, 10)
+    client.post("/api/meters", json={"number": "2", "installed_at": "2025-06-10T12:00"})
+    assert [m["removed_local"] for m in client.get("/api/comparison").json()["meters"]] == [None, None]
+
+    edit = {"number": "1", "installed_at": None}
+    assert client.put(f"/api/meters/{old}", json={**edit, "removed_at": "2025-06-01T12:00"}).status_code == 422   # before its last reading
+    assert client.put(f"/api/meters/{old}", json={**edit, "removed_at": "2025-06-10T12:00"}).status_code == 200
+    assert client.get("/api/comparison").json()["meters"][0]["removed_local"] == "2025-06-10T12:00"
+    # no final reading was entered: the app says what the meter should have shown when it came out
+    est = client.get("/api/comparison").json()["meters"][0]["final_estimate"]
+    assert (est["at"], est["import_kwh"], est["export_kwh"]) == ("2025-06-10T12:00", 100 + 5 * 12, 10 + 5 * 1)
+    assert _reading(client, old, "2025-06-12T12:00", 150, 12).status_code == 422       # no readings after the removal
+    assert _reading(client, old, "2025-06-10T12:00", 160, 12).status_code == 200       # the final value is still welcome
+    assert client.get("/api/comparison").json()["meters"][0]["final_estimate"] is None   # known now, nothing to estimate
+    assert client.put(f"/api/meters/{old}", json=edit).status_code == 200              # and it can be put back in service
+    assert client.get("/api/comparison").json()["meters"][0]["removed_local"] is None

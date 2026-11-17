@@ -515,7 +515,9 @@ async function refreshMeter() { S.cmp = await api('/api/comparison'); render(); 
 
 function dlgNewMeter() {
   const n = nowLocal();
-  dialog('Zähler anlegen', 'Die Zählernummer steht auf dem Zähler und auf der Stromrechnung. Einbaudatum und Anfangsstand nur eintragen, wenn sie bekannt sind (z. B. aus dem Einbauprotokoll).', [
+  const replacing = S.cmp && S.cmp.meters.some(m => !m.removed_at);
+  dialog('Zähler anlegen', (replacing ? 'Ersetzt der neue Zähler einen vorhandenen? Dann bitte abbrechen und „Zählerwechsel erfassen“ benutzen – nur so wird der alte Zähler als ausgebaut vermerkt. ' : '')
+    + 'Die Zählernummer steht auf dem Zähler und auf der Stromrechnung. Einbaudatum und Anfangsstand nur eintragen, wenn sie bekannt sind (z. B. aus dem Einbauprotokoll).', [
     textField('Zählernummer', 'number', '', { required: true }),
     textField('Bezeichnung (optional)', 'label', '', { placeholder: 'z. B. Zweirichtungszähler' }),
     textField('Einbaudatum (optional)', 'date', '', { type: 'date', max: n.date }),
@@ -531,17 +533,20 @@ function dlgNewMeter() {
     toast('Zähler angelegt.');
   });
 }
+const meterBody = (m, extra = {}) => ({ number: m.number, label: m.label || null, note: m.note || null, installed_at: m.installed_local, removed_at: m.removed_local, ...extra });
 function dlgEditMeter(m) {
-  dialog(`Zähler ${m.number} bearbeiten`, null, [
+  const at = (f, d, t) => (f.elements[d].value ? `${f.elements[d].value}T${f.elements[t].value || '12:00'}` : null);
+  dialog(`Zähler ${m.number} bearbeiten`, 'Wurde dieser Zähler ausgebaut, hier das Datum eintragen. Leer heißt: Der Zähler ist in Betrieb.', [
     textField('Zählernummer', 'number', m.number, { required: true }), textField('Bezeichnung', 'label', m.label || ''),
-    textField('Einbaudatum', 'date', m.installed_local ? m.installed_local.slice(0, 10) : '', { type: 'date' }),
+    textField('Eingebaut am', 'date', m.installed_local ? m.installed_local.slice(0, 10) : '', { type: 'date' }),
     textField('Uhrzeit', 'time', m.installed_local ? m.installed_local.slice(11, 16) : '12:00', { type: 'time' }),
+    textField('Ausgebaut am', 'rdate', m.removed_local ? m.removed_local.slice(0, 10) : '', { type: 'date', hint: 'leer = in Betrieb' }),
+    textField('Uhrzeit', 'rtime', m.removed_local ? m.removed_local.slice(11, 16) : '12:00', { type: 'time' }),
     textField('Notiz', 'note', m.note || '', { wide: true }),
   ], 'Speichern', async f => {
-    const date = f.elements.date.value;
     await api(`/api/meters/${m.id}`, { method: 'PUT', json: {
       number: f.elements.number.value, label: f.elements.label.value || null, note: f.elements.note.value || null,
-      installed_at: date ? `${date}T${f.elements.time.value || '12:00'}` : null,
+      installed_at: at(f, 'date', 'time'), removed_at: at(f, 'rdate', 'rtime'),
     } });
   });
 }
@@ -598,6 +603,27 @@ function viewMeter() {
   }
   const active = cmp.meters.filter(m => !m.removed_at);
   const n = nowLocal();
+
+  // An older meter still "in Betrieb" next to a newer one: usually a swap entered as a plain new meter.
+  const startOf = m => m.installed_local || (m.readings[0] && m.readings[0].taken_local) || null;
+  const newestActive = [...active].sort((a, b) => b.id - a.id)[0];
+  let parallel = [];
+  try { parallel = JSON.parse(localStorage.getItem('parallelMeters') || '[]'); } catch { /* private mode */ }
+  for (const m of active) {
+    if (m === newestActive || parallel.includes(m.id)) continue;
+    const when = startOf(newestActive), last = m.readings[m.readings.length - 1];
+    const fits = when && (!last || last.taken_local <= when);
+    out.push(h('div', { class: 'notice' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '!'), h('div', {},
+      h('p', {}, h('strong', {}, `Zähler ${m.number} ist noch als „in Betrieb“ vermerkt, `), `obwohl Zähler ${newestActive.number} später dazukam. Wurde Zähler ${m.number} dabei ausgebaut?`),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        fits ? h('button', { class: 'btn small', onclick: async () => {
+          try { await api(`/api/meters/${m.id}`, { method: 'PUT', json: meterBody(m, { removed_at: when }) }); toast(`Zähler ${m.number} als ausgebaut vermerkt.`); await refreshMeter(); } catch (ex) { toast(ex.message); }
+        } }, `Ja, ausgebaut am ${dtDE(when)}`) : h('button', { class: 'btn small', onclick: () => dlgEditMeter(m) }, 'Ausbaudatum eintragen'),
+        h('button', { class: 'btn small', onclick: () => {
+          try { localStorage.setItem('parallelMeters', JSON.stringify([...parallel, m.id])); } catch { /* private mode */ }
+          render();
+        } }, 'Nein, beide laufen')))));
+  }
 
   // entry form
   const err = h('p', { class: 'err wide' });
@@ -759,6 +785,15 @@ function viewMeter() {
         }))),
       h('div', { class: 'legendline' }, h('span', {}, '„Erwartet“ = vorherige Ablesung plus das, was sonnen seitdem aufgezeichnet hat. Abweichung = Zählerstand minus erwartet.')))
         : h('p', { class: 'empty' }, 'Noch keine Ablesung für diesen Zähler.'));
+    const fe = m.final_estimate;
+    if (fe) {
+      c.append(h('div', { class: 'notice info', style: 'margin-top:12px' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, 'i'), h('div', {},
+        h('p', {}, h('strong', {}, `Geschätzter Endstand beim Ausbau am ${dtDE(fe.at)}: `),
+          `1.8.0 etwa ${nf(1).format(fe.import_kwh)} kWh` + (fe.export_kwh != null ? `, 2.8.0 etwa ${nf(1).format(fe.export_kwh)} kWh.` : '.')),
+        h('p', {}, `Für diesen Zähler ist kein Endstand eingetragen. Der Wert ist die letzte Ablesung vom ${dtDE(fe.since)} plus das, was sonnen bis zum Ausbau aufgezeichnet hat`
+          + (fe.missing_days > 0.1 ? `; für ${n1.format(fe.missing_days)} Tage davon gibt es keine sonnen-Daten (zusätzlich etwa ${n0.format(fe.est_import[0])} – ${n0.format(fe.est_import[2])} kWh Bezug)` : '')
+          + '. Steht der echte Endstand auf dem Wechselprotokoll oder einer Rechnung, bitte als Ablesung mit dem Ausbaudatum nachtragen.'))));
+    }
     $('header', c).append(h('div', { class: 'row' },
       h('button', { class: 'btn small', onclick: () => dlgEditMeter(m) }, 'Zähler bearbeiten'),
       h('button', { class: 'btn small danger', onclick: async () => {

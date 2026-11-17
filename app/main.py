@@ -181,6 +181,7 @@ class MeterIn(BaseModel):
     number: str = Field(min_length=1, max_length=60)
     label: str | None = Field(default=None, max_length=120)
     installed_at: str | None = None
+    removed_at: str | None = None      # empty = still in service
     note: str | None = Field(default=None, max_length=500)
     start_import_kwh: float | None = Field(default=None, ge=0)
     start_export_kwh: float | None = Field(default=None, ge=0)
@@ -258,6 +259,14 @@ def _insert_reading(conn, meter_id, taken_at, imp, exp, kind, note):
         raise HTTPException(409, "Für diesen Zeitpunkt gibt es bereits eine Ablesung.")
 
 
+def _meter_dates(body: MeterIn) -> tuple[int | None, int | None]:
+    installed = _when(body.installed_at) if body.installed_at else None
+    removed = _when(body.removed_at) if body.removed_at else None
+    if installed and removed and removed < installed:
+        raise HTTPException(422, "Der Ausbau liegt vor dem Einbau.")
+    return installed, removed
+
+
 @app.get("/api/comparison", dependencies=[api])
 def comparison():
     with db.connect() as conn:
@@ -266,12 +275,12 @@ def comparison():
 
 @app.post("/api/meters", dependencies=[api])
 def create_meter(body: MeterIn):
-    installed = _when(body.installed_at) if body.installed_at else None
+    installed, removed = _meter_dates(body)
     if body.start_import_kwh is not None and installed is None:
         raise HTTPException(422, "Für einen Anfangsstand wird das Einbaudatum benötigt.")
     with db.connect() as conn:
-        meter_id = conn.execute("INSERT INTO meters(number,label,installed_at,note) VALUES(?,?,?,?)",
-                                (body.number.strip(), body.label, installed, body.note)).lastrowid
+        meter_id = conn.execute("INSERT INTO meters(number,label,installed_at,removed_at,note) VALUES(?,?,?,?,?)",
+                                (body.number.strip(), body.label, installed, removed, body.note)).lastrowid
         if body.start_import_kwh is not None:
             _insert_reading(conn, meter_id, installed, body.start_import_kwh, body.start_export_kwh,
                             "install", "Anfangsstand")
@@ -280,13 +289,16 @@ def create_meter(body: MeterIn):
 
 @app.put("/api/meters/{meter_id}", dependencies=[api])
 def update_meter(meter_id: int, body: MeterIn):
-    installed = _when(body.installed_at) if body.installed_at else None
+    installed, removed = _meter_dates(body)
     with db.connect() as conn:
-        first = conn.execute("SELECT MIN(taken_at) FROM readings WHERE meter_id=?", (meter_id,)).fetchone()[0]
+        first, last = conn.execute("SELECT MIN(taken_at), MAX(taken_at) FROM readings WHERE meter_id=?",
+                                   (meter_id,)).fetchone()
         if installed and first and first < installed:
             raise HTTPException(422, "Es gibt Ablesungen vor diesem Einbaudatum.")
-        done = conn.execute("UPDATE meters SET number=?, label=?, installed_at=?, note=? WHERE id=?",
-                            (body.number.strip(), body.label, installed, body.note, meter_id)).rowcount
+        if removed and last and last > removed:
+            raise HTTPException(422, f"Es gibt Ablesungen nach diesem Ausbaudatum (zuletzt {_fmt(last)}).")
+        done = conn.execute("UPDATE meters SET number=?, label=?, installed_at=?, removed_at=?, note=? WHERE id=?",
+                            (body.number.strip(), body.label, installed, removed, body.note, meter_id)).rowcount
     if not done:
         raise HTTPException(404, "Zähler nicht gefunden.")
     return {"ok": True}
