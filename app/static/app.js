@@ -565,7 +565,7 @@ function dlgMeterChange(active) {
     for (const k of ['oimp', 'oexp']) { const el = e.target.form.elements[k]; el.disabled = e.target.checked; if (e.target.checked) { el.value = ''; el.dispatchEvent(new Event('input')); } }
   } });
   dialog('Zählerwechsel erfassen', 'Wenn der Netzbetreiber den Zähler tauscht: Die Endstände des alten und die Anfangsstände des neuen Zählers stehen auf dem Wechselprotokoll. Alle vier Werte werden gebraucht.', [
-    h('label', { class: 'field' }, 'Alter Zähler', h('select', { name: 'old' }, active.map(m => h('option', { value: m.id }, m.number))), h('span', { class: 'hint' })),
+    h('label', { class: 'field' }, 'Alter Zähler', h('select', { name: 'old' }, [...active].sort((a, b) => b.id - a.id).map(m => h('option', { value: m.id }, m.number))), h('span', { class: 'hint' })),
     textField('Neue Zählernummer', 'number', '', { required: true }),
     textField('Datum des Wechsels', 'date', n.date, { type: 'date', required: true, max: n.date }),
     textField('Uhrzeit', 'time', '12:00', { type: 'time', required: true }),
@@ -602,7 +602,9 @@ function viewMeter() {
   // entry form
   const err = h('p', { class: 'err wide' });
   const hint = h('p', { class: 'sub wide' });
-  const sel = h('select', { name: 'meter', onchange: showHint }, (active.length ? active : cmp.meters).map(m => h('option', { value: m.id }, `${m.number}${m.label ? ' – ' + m.label : ''}`)));
+  // Newest meter first, so it is the one preselected when a reading is entered.
+  const newestFirst = list => [...list].sort((a, b) => b.id - a.id);
+  const sel = h('select', { name: 'meter', onchange: showHint }, newestFirst(active.length ? active : cmp.meters).map(m => h('option', { value: m.id }, `${m.number}${m.label ? ' – ' + m.label : ''}`)));
   const meterOf = () => cmp.meters.find(x => x.id === +sel.value);
   function showHint() {
     const e = meterOf()?.expected;
