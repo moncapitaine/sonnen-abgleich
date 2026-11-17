@@ -1,0 +1,54 @@
+# Sonnen-Abgleich on a Docker Swarm, behind an edge proxy that is already there: caddy-docker-proxy, which routes
+# by the `caddy` labels below and gets the TLS certificate. No ports of our own.
+#
+# Deploy with ./deploy.sh, which loads .env, builds the image, prepares the data folder and names the secrets.
+# The values of the secrets are files in ./secrets (made by ./setup.sh), never values in this file.
+version: '3.8'
+
+services:
+  app:
+    image: ${IMAGE:?deploy.sh sets IMAGE}
+    environment:
+      SITE_NAME: ${SITE_NAME:-}
+      SYNC_TIME: ${SYNC_TIME:-04:20}
+      APP_PASSWORD_FILE: /run/secrets/app_password
+    secrets: [app_password]
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      # A folder on the node the service is pinned to, made by deploy.sh. It holds the SQLite database: back it up.
+      - ${DATA_DIR:?Set DATA_DIR in .env}:/data
+      - type: tmpfs
+        target: /tmp
+    networks: [proxy]
+    deploy:
+      # The database is one SQLite file: exactly one instance, on the one node that has the folder.
+      replicas: 1
+      placement:
+        constraints: ['node.id == ${NODE_ID:?deploy.sh sets NODE_ID}']
+      update_config:
+        order: stop-first
+      restart_policy:
+        condition: any
+        delay: 5s
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+      labels:
+        caddy: ${APP_HOST:?Set APP_HOST in .env}
+        caddy.reverse_proxy: '{{upstreams 8000}}'
+        caddy.encode: gzip zstd
+
+networks:
+  # The network of the edge proxy, which exists already.
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-caddy}
+
+# A secret of a swarm cannot be changed, only replaced. So each carries a fingerprint of its file in its name
+# (deploy.sh works it out): a changed file is a new secret, and the service is restarted with it.
+secrets:
+  app_password:
+    file: ./secrets/app_password
+    name: ${STACK_NAME}_app_password_${APP_PASSWORD_PRINT}

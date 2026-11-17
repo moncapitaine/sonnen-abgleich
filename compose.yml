@@ -1,0 +1,16 @@
+# Run on one machine:  cp .env.example .env  &&  docker compose up -d --build
+# Then open http://localhost:8080
+services:
+  sonnen:
+    build: .
+    image: sonnen-abgleich:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      IMPORT_DIR: /import
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./data:/data
+      # CSV exports lying in this folder are imported automatically (read-only)
+      - ./:/import:ro

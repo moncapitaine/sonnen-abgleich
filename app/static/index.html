@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonnen-Abgleich</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="sun" aria-hidden="true"></span>
+    <div>
+      <h1>Sonnen-Abgleich</h1>
+      <p id="site-name" class="muted"></p>
+    </div>
+  </div>
+  <nav id="tabs" class="tabs" aria-label="Bereiche">
+    <button data-tab="overview" class="on">Übersicht</button>
+    <button data-tab="analysis">Analyse</button>
+    <button data-tab="meter">Zählerabgleich</button>
+    <button data-tab="data">Daten</button>
+  </nav>
+</header>
+
+<div id="filters" class="filters" hidden>
+  <div class="seg" id="presets" role="group" aria-label="Zeitraum"></div>
+  <label>von <input type="date" id="f-from"></label>
+  <label>bis <input type="date" id="f-to"></label>
+  <div class="seg" id="gran" role="group" aria-label="Auflösung" hidden>
+    <button data-g="day">Tag</button><button data-g="week">Woche</button><button data-g="month" class="on">Monat</button>
+  </div>
+</div>
+
+<main id="view"></main>
+
+<dialog id="dlg"><form method="dialog" id="dlg-body"></form></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="vendor/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

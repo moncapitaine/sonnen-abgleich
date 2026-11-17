@@ -1,0 +1,11 @@
+# house data and secrets never go into git
+.env
+data/
+/*.csv
+__pycache__/
+.pytest_cache/
+
+# deployment settings and secrets stay on the machine you deploy from
+deploy/.env
+deploy/secrets/
+.DS_Store

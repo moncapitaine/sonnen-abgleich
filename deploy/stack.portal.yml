@@ -1,0 +1,18 @@
+# The login of the sonnen portal, for the daily download. deploy.sh adds this file when ./secrets has both
+# sonnen_username and sonnen_password. Without it the app runs on imported CSV files only.
+version: '3.8'
+
+services:
+  app:
+    environment:
+      SONNEN_USERNAME_FILE: /run/secrets/sonnen_username
+      SONNEN_PASSWORD_FILE: /run/secrets/sonnen_password
+    secrets: [sonnen_username, sonnen_password]
+
+secrets:
+  sonnen_username:
+    file: ./secrets/sonnen_username
+    name: ${STACK_NAME}_sonnen_username_${SONNEN_USERNAME_PRINT}
+  sonnen_password:
+    file: ./secrets/sonnen_password
+    name: ${STACK_NAME}_sonnen_password_${SONNEN_PASSWORD_PRINT}
