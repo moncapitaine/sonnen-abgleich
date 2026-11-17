@@ -18,6 +18,10 @@ The UI is in German (it is used by the house owner); code and docs are in Englis
   2.8.0 export) are entered with date and time. For every pair of consecutive
   readings the app compares the meter's difference with what sonnen recorded in
   exactly that time span.
+- **Kosten**: with the contract's base price (EUR/month) and energy price (ct/kWh) the app shows
+  the cost of every month and proposes what to report to the provider: the yearly consumption of
+  the last twelve months (days without sonnen data filled from the same week of another year) and
+  the monthly advance payment that follows from it. A price change is entered with its start date.
 - **Meter swaps**: every reading belongs to a meter identified by its number. A swap
   is recorded with its date, the final value of the old meter and the first value of
   the new one. Values of different devices are never subtracted from each other.
@@ -136,7 +140,7 @@ house never consumes exactly 0 Wh.
 
 ```
 app/main.py           API, login, static files
-app/analysis.py       coverage, gaps, estimates, anomalies, meter comparison
+app/analysis.py       coverage, gaps, estimates, anomalies, meter comparison, costs
 app/ingest.py         CSV import
 app/sonnen_portal.py  portal login + download
 app/sync.py           daily scheduler, sync log

@@ -201,3 +201,34 @@ def test_build_info_and_no_stale_ui(client):
     # what a phone needs to put the app on its home screen
     assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
     assert client.get("/apple-touch-icon.png").status_code == 200
+
+
+def test_costs_and_advance_payment_proposal(client):
+    start = date(2025, 1, 1)
+    zero = {start + timedelta(days=i) for i in range(400, 420)}       # 20 days without sonnen data
+    load(*make_csvs(start, 500, zero=zero))                           # 12 kWh/day from the grid otherwise
+    assert client.get("/api/costs").json()["proposal"] is None        # no contract entered yet
+    assert client.post("/api/tariffs", json={"base_eur_month": 10, "price_ct_kwh": 30}).status_code == 200
+    assert client.post("/api/tariffs", json={"base_eur_month": 10, "price_ct_kwh": 0}).status_code == 422
+    c = client.get("/api/costs").json()
+
+    june = [m for m in c["months"] if m["month"] == "2025-06"][0]     # 30 days * 12 kWh = 360 kWh
+    assert (june["kwh"], june["energy_eur"], june["base_eur"], june["total_eur"], june["complete"]) == (360, 108, 10, 118, True)
+    assert [y for y in c["years"] if y["year"] == "2025"][0]["total_eur"] == pytest.approx(365 * 12 * 0.30 + 120)
+
+    # the gap is filled with what the same days needed a year earlier, so the year comes out at 365 * 12 kWh
+    p = c["proposal"]
+    assert p["days"] == 365 and p["missing_days"] == 20 and not p["extrapolated"]
+    assert p["recorded_kwh"] == 345 * 12 and p["filled_kwh"] == pytest.approx(240, abs=0.5)
+    assert p["annual_kwh"] == pytest.approx(4380, abs=0.5) and p["annual_kwh_rounded"] == 4400
+    assert p["monthly_payment"] == 120                                # (12 * 10 + 4400 * 0.30) / 12
+
+    # a price change applies from its date on; earlier months keep the old price
+    client.post("/api/tariffs", json={"base_eur_month": 12, "price_ct_kwh": 40, "valid_from": "2026-01-01"})
+    c = client.get("/api/costs").json()
+    assert [m for m in c["months"] if m["month"] == "2025-06"][0]["total_eur"] == 118
+    assert [m for m in c["months"] if m["month"] == "2026-01"][0]["total_eur"] == pytest.approx(31 * 12 * 0.40 + 12)
+    assert c["proposal"]["monthly_payment"] == 159                    # (12 * 12 + 4400 * 0.40) / 12 = 158.67
+    # saving again for the same date replaces instead of adding
+    client.post("/api/tariffs", json={"base_eur_month": 12, "price_ct_kwh": 35, "valid_from": "2026-01-01"})
+    assert len(client.get("/api/costs").json()["tariffs"]) == 2

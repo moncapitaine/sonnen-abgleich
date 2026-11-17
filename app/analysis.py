@@ -4,6 +4,8 @@ The central question is "how much energy did sonnen record between two points in
 time, and how much of that time has no sonnen data at all?" - that is what makes a
 comparison with the official meter meaningful.
 """
+import calendar
+import math
 from datetime import date, datetime, timedelta
 from statistics import median
 
@@ -373,3 +375,96 @@ def comparison(conn, ds: Dataset) -> dict:
         if total["export"]:
             total["export"]["diff"] = round(total["export"]["meter"] - total["export"]["sonnen"], 1)
     return {"meters": meters, "intervals": intervals, "breaks": breaks, "total": total}
+
+
+# ---- cost of the grid purchase -------------------------------------------------------
+
+def costs(conn, ds: Dataset) -> dict:
+    """Monthly cost of the grid purchase and a proposal for the monthly advance payment.
+
+    A German contract has a fixed base price per month and one price per kWh that does not
+    vary over the year. The provider asks for the expected yearly consumption and derives
+    twelve equal advance payments ("Abschlag") from it.
+    """
+    tariffs = [dict(r) for r in conn.execute("SELECT * FROM tariffs ORDER BY valid_from")]
+    out = {"tariffs": tariffs, "months": [], "years": [], "proposal": None}
+    if not tariffs or not ds.first_day:
+        return out
+
+    def tariff_for(d: date) -> dict:
+        chosen = tariffs[0]   # days before the first known price are costed with that first price
+        for t in tariffs:
+            if t["valid_from"] <= d.isoformat():
+                chosen = t
+        return chosen
+
+    months: dict[str, dict] = {}
+    for d in ds.all_days():
+        t = tariff_for(d)
+        m = months.setdefault(d.isoformat()[:7], {
+            "month": d.isoformat()[:7], "days": 0, "kwh": 0.0, "energy_eur": 0.0, "base_eur": 0.0,
+            "missing_days": 0.0, "est_kwh": [0.0, 0.0, 0.0], "est_eur": [0.0, 0.0, 0.0], "reference": set()})
+        kwh = ds.days[d]["purchase"] / 1000 if d in ds.days else 0.0
+        m["days"] += 1
+        m["kwh"] += kwh
+        m["energy_eur"] += kwh * t["price_ct_kwh"] / 100
+        m["base_eur"] += t["base_eur_month"] / calendar.monthrange(d.year, d.month)[1]
+        miss = 1 - ds.cov[d]
+        if miss > 0.001:
+            ref, label = ds._ref(d)
+            est = ds._estimate(ref, miss)
+            m["missing_days"] += miss
+            m["reference"].add(label)
+            for k, key in enumerate(("imp_lo", "imp_mid", "imp_hi")):
+                m["est_kwh"][k] += est[key] / 1000
+                m["est_eur"][k] += est[key] / 1000 * t["price_ct_kwh"] / 100
+    years: dict[str, dict] = {}
+    for m in months.values():
+        y, mo = int(m["month"][:4]), int(m["month"][5:])
+        m["complete"] = m["days"] == calendar.monthrange(y, mo)[1]
+        m["total_eur"] = m["energy_eur"] + m["base_eur"]
+        m["reference"] = ", ".join(sorted(m["reference"]))
+        yr = years.setdefault(str(y), {"year": str(y), "months": 0.0, "kwh": 0.0, "total_eur": 0.0,
+                                       "missing_days": 0.0, "est_eur": [0.0, 0.0, 0.0]})
+        yr["months"] += m["days"] / calendar.monthrange(y, mo)[1]
+        for k in ("kwh", "total_eur", "missing_days"):
+            yr[k] += m[k]
+        yr["est_eur"] = [a + b for a, b in zip(yr["est_eur"], m["est_eur"])]
+
+    def tidy(item: dict) -> dict:
+        return {k: ([round(x, 2) for x in v] if isinstance(v, list) else round(v, 2) if isinstance(v, float) else v)
+                for k, v in item.items()}
+    out["months"] = [tidy(m) for m in months.values()]
+    out["years"] = [tidy(y) for y in years.values()]
+
+    # Proposal: the last 365 complete days. Days without sonnen data are filled with what the
+    # same week of another year needed from the grid, i.e. the system in normal operation.
+    end = ds.last_day - timedelta(days=1)
+    start = max(ds.first_day, end - timedelta(days=364))
+    if end >= start:
+        recorded = filled = missing = 0.0
+        labels = set()
+        n = (end - start).days + 1
+        for i in range(n):
+            d = start + timedelta(days=i)
+            recorded += ds.days[d]["purchase"] / 1000 if d in ds.days else 0.0
+            miss = 1 - ds.cov[d]
+            if miss > 0.001:
+                ref, label = ds._ref(d)
+                filled += miss * ref["purchase"] / 1000
+                missing += miss
+                labels.add(label)
+        t = tariffs[-1]   # the price that applies now
+        annual = (recorded + filled) / n * 365
+        annual_round = math.ceil(annual / 50) * 50
+        yearly_cost = 12 * t["base_eur_month"] + annual_round * t["price_ct_kwh"] / 100
+        out["proposal"] = {
+            "from": start.isoformat(), "to": end.isoformat(), "days": n, "extrapolated": n < 360,
+            "recorded_kwh": round(recorded, 1), "filled_kwh": round(filled, 1), "missing_days": round(missing, 1),
+            "reference": ", ".join(sorted(labels)),
+            "annual_kwh": round(annual, 1), "annual_kwh_rounded": annual_round,
+            "monthly_kwh": round(annual_round / 12, 1),
+            "yearly_cost": round(yearly_cost, 2), "monthly_payment": math.ceil(yearly_cost / 12),
+            "base_eur_month": t["base_eur_month"], "price_ct_kwh": t["price_ct_kwh"],
+        }
+    return out

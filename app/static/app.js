@@ -23,6 +23,7 @@ function h(tag, attrs, ...kids) {
 
 const nf = d => new Intl.NumberFormat('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
 const n0 = nf(0), n1 = nf(1);
+const eur = (v, d = 2) => (v == null ? '–' : nf(d).format(v) + ' €');
 const num = (v, d = 1) => (v == null || Number.isNaN(v) ? '–' : nf(d).format(v));
 const kwh = wh => { const v = wh / 1000; return (Math.abs(v) >= 100 ? n0 : n1).format(v); };
 const pct = v => (v == null || !Number.isFinite(v) ? '–' : n0.format(v * 100) + ' %');
@@ -91,6 +92,7 @@ async function loadData() {
   const [ov, t] = await Promise.all([api('/api/overview'), api('/api/daily')]);
   S.ov = ov;
   S.rev ??= ov.build.revision;
+  S.costs = null;
   S.days = t.day.map((day, i) => {
     const d = {
       day, produced: t.produced[i], consumed: t.consumed[i], charged: t.bat_charged[i], discharged: t.bat_discharged[i],
@@ -765,6 +767,107 @@ function viewMeter() {
   return out;
 }
 
+// ---------- cost and advance payment ----------------------------------------------------
+function viewCost() {
+  const c = S.costs, out = [];
+  const cur = c.tariffs[c.tariffs.length - 1];
+  const reload = async () => { S.costs = await api('/api/costs'); render(); };
+
+  // contract
+  const err = h('p', { class: 'err wide' });
+  const dec = (label, name, value, hint, ph) => textField(label, name, value, { inputmode: 'decimal', autocomplete: 'off', required: true, placeholder: ph, hint });
+  const form = h('form', { class: 'form', onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    const f = e.target;
+    try {
+      await api('/api/tariffs', { method: 'POST', json: {
+        base_eur_month: readNum(f, 'base', true, 'den Grundpreis'), price_ct_kwh: readNum(f, 'price', true, 'den Arbeitspreis'),
+        valid_from: f.elements.from.value || null,
+      } });
+      toast('Vertragspreise gespeichert.'); await reload();
+    } catch (ex) { err.textContent = ex.message; }
+  } },
+    dec('Grundpreis (€ pro Monat)', 'base', cur ? nf(2).format(cur.base_eur_month) : '', 'Jahres-Grundpreis durch 12 teilen', 'z. B. 12,50'),
+    dec('Arbeitspreis (Cent pro kWh)', 'price', cur ? nf(2).format(cur.price_ct_kwh) : '', 'Bruttopreis laut Vertrag', 'z. B. 32,5'),
+    textField('gilt ab (optional)', 'from', cur ? cur.valid_from : '', { type: 'date', hint: 'leer lassen: gilt für den ganzen Zeitraum' }),
+    err, h('div', { class: 'row wide' }, h('button', { class: 'btn primary', type: 'submit' }, 'Preise speichern')));
+  const contract = card('Stromvertrag', c.tariffs.length
+    ? 'Ändert der Anbieter den Preis, die neuen Werte mit dem Datum eintragen, ab dem sie gelten. Frühere Monate behalten ihren alten Preis.'
+    : 'Grundpreis und Arbeitspreis stehen im Vertrag und auf jeder Rechnung. Damit werden die Kosten jedes Monats berechnet und ein passender monatlicher Abschlag vorgeschlagen.', form,
+    c.tariffs.length > 1 && h('div', { class: 'tablewrap', style: 'margin-top:12px' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Gilt ab', 'Grundpreis', 'Arbeitspreis', ''].map(x => h('th', {}, x)))),
+      h('tbody', {}, [...c.tariffs].reverse().map(t => h('tr', {},
+        h('td', {}, t.valid_from ? dDE(t.valid_from) : 'von Anfang an'), h('td', {}, eur(t.base_eur_month) + ' / Monat'), h('td', {}, nf(2).format(t.price_ct_kwh) + ' ct/kWh'),
+        h('td', {}, h('button', { class: 'btn small danger', onclick: async () => {
+          if (!confirm('Diesen Preis löschen?')) return;
+          try { await api(`/api/tariffs/${t.id}`, { method: 'DELETE' }); await reload(); } catch (ex) { toast(ex.message); }
+        } }, 'Löschen'))))))));
+  if (!c.tariffs.length || !c.proposal) { out.push(contract); return out; }
+
+  // proposal
+  const p = c.proposal;
+  const stat = (k, v, unit, note) => h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v, unit && h('small', {}, unit)), note && h('div', { class: 'n' }, note));
+  out.push(card('Vorschlag für den Stromanbieter', 'Auf Grundlage des Netzbezugs der letzten zwölf Monate.',
+    h('div', { class: 'hero' },
+      stat('Jahresverbrauch melden', n0.format(p.annual_kwh_rounded), 'kWh pro Jahr', `im Schnitt ${n0.format(p.monthly_kwh)} kWh pro Monat`),
+      stat('Passender Abschlag', n0.format(p.monthly_payment), '€ pro Monat', `${eur(p.yearly_cost, 0)} im Jahr`)),
+    h('p', { class: 'prose' }, `Vom ${dDE(p.from)} bis ${dDE(p.to)} hat sonnen ${n0.format(p.recorded_kwh)} kWh Netzbezug aufgezeichnet`
+      + (p.filled_kwh > 0.5 ? `. Für ${n1.format(p.missing_days)} Tage ohne Aufzeichnung sind ${n0.format(p.filled_kwh)} kWh ergänzt (Werte: ${p.reference}, Anlage im Normalbetrieb)` : '')
+      + (p.extrapolated ? `. Das sind erst ${p.days} Tage; der Wert ist auf ein ganzes Jahr hochgerechnet` : '')
+      + `. Das ergibt ${n0.format(p.annual_kwh)} kWh im Jahr, aufgerundet ${n0.format(p.annual_kwh_rounded)} kWh.`),
+    h('p', { class: 'prose' }, `Abschlag = (12 × ${eur(p.base_eur_month)} Grundpreis + ${n0.format(p.annual_kwh_rounded)} kWh × ${nf(2).format(p.price_ct_kwh)} ct) ÷ 12, auf volle Euro aufgerundet.`),
+    p.missing_days > 5 && h('div', { class: 'notice', style: 'margin-top:12px' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '!'),
+      h('p', {}, 'Der Vorschlag gilt für eine Anlage, die normal läuft. In der Zeit ohne Aufzeichnung war der tatsächliche Bezug vermutlich höher als hier angesetzt – die Jahresabrechnung für diesen Zeitraum kann deshalb eine Nachzahlung bringen, auch wenn der Abschlag künftig passt.'))));
+
+  // monthly cost
+  const M = c.months;
+  const B = M.map(m => ({
+    label: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(2, 4)}`, title: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(0, 4)}` + (m.complete ? '' : ' (angebrochen)'),
+    n: m.days, missing: m.missing_days,
+  }));
+  const el = h('div', { class: 'chart tall' });
+  const o = baseOpt();
+  o.xAxis = axCat(B.map(b => b.label)); o.yAxis = axVal('€');
+  o.tooltip.formatter = tip(B, '€', 'zusammen');
+  o.series = [
+    { ...barSeries('Kosten laut Aufzeichnung', C.grid, M.map(m => (m.complete ? m.total_eur : { value: m.total_eur, itemStyle: { opacity: 0.45 } })), 's'),
+      markLine: { silent: true, symbol: 'none', lineStyle: { color: C.text2, width: 1.5, type: 'solid' },
+        label: { formatter: `Abschlag ${n0.format(p.monthly_payment)} €`, position: 'insideEndTop', color: C.text, fontSize: 11 }, data: [{ yAxis: p.monthly_payment }] } },
+    barSeries('Schätzung für Zeit ohne Daten', C.est, M.map(m => (m.missing_days > 0.05 ? m.est_eur[1] : 0)), 's', true),
+  ];
+  out.push(card('Stromkosten pro Monat', 'Grundpreis plus Netzbezug mal Arbeitspreis. Im Winter liegen die Kosten über dem Abschlag, im Sommer darunter – übers Jahr gleicht es sich aus.', el,
+    h('div', { class: 'legendline' }, h('span', {}, 'Grau: geschätzte Kosten für Zeit ohne Aufzeichnung (Annahme: Speicher aus, PV-Anlage lief). Blass: angebrochener Monat.'))));
+  queueMicrotask(() => draw(el, o));
+
+  const diff = v => (v > 0 ? '+' : '') + nf(2).format(v) + ' €';
+  const gapNote = x => `${n1.format(x.missing_days)} Tage ohne Daten: zusätzlich etwa ${eur(x.est_eur[0], 0)} – ${eur(x.est_eur[2], 0)}`;
+  const phone = narrow();   // a phone gets the four columns that matter; the notes move below the table
+  const mCols = [
+    ['Monat', (m, b) => (phone ? b.label + (m.complete ? '' : ' *') : b.title)], ['Netzbezug', m => n0.format(m.kwh) + ' kWh'],
+    !phone && ['Arbeitspreis', m => eur(m.energy_eur)], !phone && ['Grundpreis', m => eur(m.base_eur)],
+    ['Kosten', m => h('strong', {}, eur(m.total_eur))],
+    [phone ? '± Abschlag' : 'zum Abschlag', m => (m.missing_days >= 0.5 ? (phone ? 'Lücke' : '–') : m.complete ? diff(m.total_eur - p.monthly_payment) : '–')],
+    !phone && ['Hinweis', m => (m.missing_days > 0.05 ? gapNote(m) : ''), 'l'],
+  ].filter(Boolean);
+  const yNote = y => [y.months < 11.95 && `${n1.format(y.months)} Monate erfasst`, y.missing_days > 0.05 && gapNote(y)].filter(Boolean).join(' · ');
+  const yCols = [
+    ['Jahr', y => y.year], ['Netzbezug', y => n0.format(y.kwh) + ' kWh'], ['Kosten', y => h('strong', {}, eur(y.total_eur))],
+    ['pro Monat', y => eur(y.total_eur / Math.max(0.1, y.months))], !phone && ['Hinweis', yNote, 'l'],
+  ].filter(Boolean);
+  const table = (cols, rows) => h('table', {},
+    h('thead', {}, h('tr', {}, cols.map(([t, , cls]) => h('th', { class: cls }, t)))),
+    h('tbody', {}, rows.map(r => h('tr', {}, cols.map(([, f, cls]) => h('td', { class: cls }, f(...r)))))));
+  out.push(card('Kosten je Monat', (phone ? '„± Abschlag“' : '„Zum Abschlag“') + ': Kosten des Monats minus vorgeschlagener Abschlag. Positiv heißt, der Monat war teurer als der Abschlag.',
+    h('div', { class: 'tablewrap scrolly' }, table(mCols, [...M].map((m, k) => [m, B[k]]).reverse())),
+    phone && h('div', { class: 'legendline' }, M.some(m => !m.complete) && h('span', {}, '* angebrochener Monat'),
+      M.some(m => m.missing_days >= 0.5) && h('span', {}, '„Lücke“: In diesem Monat hat sonnen zeitweise nichts aufgezeichnet; die Kosten waren höher als angezeigt.')),
+    h('h3', { style: 'margin:18px 0 6px' }, 'Je Kalenderjahr'),
+    h('div', { class: 'tablewrap' }, table(yCols, [...c.years].reverse().map(y => [y]))),
+    phone && h('div', { class: 'legendline' }, [...c.years].reverse().filter(yNote).map(y => h('span', {}, `${y.year}: ${yNote(y)}`)))));
+  out.push(contract);
+  return out;
+}
+
 // ---------- data / sync --------------------------------------------------------------
 function viewData() {
   const ov = S.ov, sy = ov.sync, out = [];
@@ -849,9 +952,10 @@ async function render() {
   $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === S.tab));
   renderFilters();
   if (S.tab === 'meter' && !S.cmp) S.cmp = await api('/api/comparison');
+  if (S.tab === 'cost' && !S.costs) S.costs = await api('/api/costs');
   const keep = window.scrollY;
   disposeCharts();
-  const view = { overview: viewOverview, analysis: viewAnalysis, meter: viewMeter, data: viewData }[S.tab]();
+  const view = { overview: viewOverview, analysis: viewAnalysis, meter: viewMeter, cost: viewCost, data: viewData }[S.tab]();
   if (S.stale) {
     view.unshift(h('div', { class: 'notice' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '!'),
       h('div', { class: 'row', style: 'flex:1;justify-content:space-between' }, h('p', {}, h('strong', {}, 'Auf dem Server läuft eine neuere Version. '), 'Diese Seite zeigt noch die alte.'),
@@ -888,7 +992,7 @@ $('#tabs').addEventListener('click', e => {
   try { localStorage.setItem('tab', S.tab); } catch { /* private mode */ }
 });
 // Open where the person left off (on a phone that is usually the meter page); a link with #... wins.
-const TABS = ['overview', 'analysis', 'meter', 'data'];
+const TABS = ['overview', 'analysis', 'meter', 'cost', 'data'];
 try { if (TABS.includes(localStorage.getItem('tab'))) S.tab = localStorage.getItem('tab'); } catch { /* private mode */ }
 if (TABS.includes(location.hash.slice(1))) S.tab = location.hash.slice(1);
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render());

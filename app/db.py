@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS readings (
     created_at TEXT,
     UNIQUE (meter_id, taken_at)
 );
+-- Prices of the electricity contract. valid_from is a local date; '' means "from the beginning".
+-- A price change is a second row with the date it applies from.
+CREATE TABLE IF NOT EXISTS tariffs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    valid_from TEXT NOT NULL DEFAULT '',
+    base_eur_month REAL NOT NULL,
+    price_ct_kwh REAL NOT NULL,
+    UNIQUE (valid_from)
+);
 CREATE TABLE IF NOT EXISTS sync_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL, finished_at TEXT,

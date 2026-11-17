@@ -371,6 +371,39 @@ def meter_change(body: MeterChange):
     return {"id": new_id}
 
 
+# ---- electricity contract and cost -----------------------------------------------------
+
+class TariffIn(BaseModel):
+    base_eur_month: float = Field(ge=0, le=500)
+    price_ct_kwh: float = Field(gt=0, le=300)
+    valid_from: date | None = None
+
+
+@app.get("/api/costs", dependencies=[api])
+def get_costs():
+    with db.connect() as conn:
+        return analysis.costs(conn, analysis.Dataset(conn))
+
+
+@app.post("/api/tariffs", dependencies=[api])
+def save_tariff(body: TariffIn):
+    """Create the price valid from a date, or replace it if that date already has one."""
+    valid_from = body.valid_from.isoformat() if body.valid_from else ""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO tariffs(valid_from, base_eur_month, price_ct_kwh) VALUES(?,?,?)"
+            " ON CONFLICT(valid_from) DO UPDATE SET base_eur_month=excluded.base_eur_month,"
+            " price_ct_kwh=excluded.price_ct_kwh", (valid_from, body.base_eur_month, body.price_ct_kwh))
+    return {"ok": True}
+
+
+@app.delete("/api/tariffs/{tariff_id}", dependencies=[api])
+def delete_tariff(tariff_id: int):
+    with db.connect() as conn:
+        conn.execute("DELETE FROM tariffs WHERE id=?", (tariff_id,))
+    return {"ok": True}
+
+
 class UIFiles(StaticFiles):
     """The UI has no versioned file names, so browsers must ask before reusing a stored copy.
 
