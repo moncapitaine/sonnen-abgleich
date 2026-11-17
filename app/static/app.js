@@ -683,7 +683,8 @@ function viewMeter() {
         te ? { meter: te.meter, sonnen: te.sonnen, diff: te.diff, days: te.days, missing: te.missing_days, est: `0 – ${n0.format(te.est[1])} kWh` } : null)));
     out.push(h('div', { class: 'legendline', style: 'margin-top:-6px' }, h('span', {}, 'Grau: geschätzte Energie in Zeiten, in denen sonnen nichts aufgezeichnet hat (Annahme: Speicher aus, PV-Anlage lief).')));
 
-    const ivItems = () => h('div', { class: 'items' }, I.map(i => h('div', { class: 'item' },
+    const newest = [...I].reverse();   // the list reads newest first; the charts above stay in time order
+    const ivItems = () => h('div', { class: 'items' }, newest.map(i => h('div', { class: 'item' },
       h('div', { class: 'item-h' }, h('strong', {}, period(i)), h('span', { class: 'muted' }, `${n1.format(i.days)} Tage`)),
       mini(['', 'Zähler', 'sonnen', 'Abweichung'], [
         ['1.8.0', n1.format(i.meter_import), n1.format(i.sonnen_import) + (i.approx ? ' ≈' : ''), { text: sgn(i.diff_import), cls: devClass(i.verdict, i.diff_import) }],
@@ -700,7 +701,7 @@ function viewMeter() {
         h('thead', {},
           h('tr', {}, h('th', { rowspan: 2 }, 'Zeitraum'), h('th', { rowspan: 2 }, 'Tage'), h('th', { colspan: 4, class: 'grp' }, '1.8.0 – Bezug'), h('th', { colspan: 4, class: 'grp' }, '2.8.0 – Einspeisung'), h('th', { rowspan: 2 }, 'Tage ohne Daten')),
           h('tr', {}, ['Zähler', 'sonnen', 'Abweichung', 'Bewertung', 'Zähler', 'sonnen', 'Abweichung', 'Bewertung'].map((x, i) => h('th', { class: (i % 4 === 3 ? 'l' : '') + (i % 4 === 0 ? ' grp' : '') }, x)))),
-        h('tbody', {}, I.map(i => h('tr', {},
+        h('tbody', {}, newest.map(i => h('tr', {},
           h('td', { title: `Zähler ${i.meter_number}` }, period(i)), h('td', {}, n1.format(i.days)),
           h('td', { class: 'grp' }, n1.format(i.meter_import)), h('td', {}, n1.format(i.sonnen_import) + (i.approx ? ' ≈' : '')),
           h('td', { class: devClass(i.verdict, i.diff_import) }, sgn(i.diff_import) + (i.diff_pct == null ? '' : ` (${sgn(i.diff_pct)} %)`)), h('td', { class: 'l' }, badge(i.verdict)),
