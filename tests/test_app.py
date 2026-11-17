@@ -190,3 +190,14 @@ def test_meter_change_needs_all_four_values_or_an_explicit_unknown(client):
     # only the new meter can be compared; the stretch up to the swap is reported as not comparable
     assert [(i["meter_number"], i["meter_import"], i["sonnen_import"]) for i in cmp["intervals"]] == [("B-2", 120, 120)]
     assert len(cmp["breaks"]) == 1 and cmp["breaks"][0]["old_meter"] == "A-1"
+
+
+def test_build_info_and_no_stale_ui(client):
+    health = client.get("/api/health").json()
+    assert health["ok"] and health["revision"] and "built_at" in health and health["started_at"]
+    assert client.get("/api/overview").json()["build"]["revision"] == health["revision"]
+    for path in ("/", "/app.js", "/app.css"):
+        assert client.get(path).headers["cache-control"] == "no-cache"
+    # what a phone needs to put the app on its home screen
+    assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
+    assert client.get("/apple-touch-icon.png").status_code == 200

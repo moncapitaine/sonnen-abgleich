@@ -52,6 +52,7 @@ fi
 # Nothing is pushed to a registry, so the swarm must not look the image up there.
 RESOLVE=always
 BUILD=false
+revision=''
 if [ "${IMAGE}" = build ]; then
   revision="$(cd "${REPOSITORY}" && find app Dockerfile requirements.txt -type f ! -name '*.pyc' | LC_ALL=C sort | while read -r f; do sha "$f"; done | sha | cut -c1-12)"
   export IMAGE="sonnen-abgleich:${STACK_NAME}-${revision}"
@@ -84,7 +85,7 @@ echo "Pinned to the node ${node_name} (${NODE_ID})."
 
 if ${BUILD}; then
   echo "Building ${IMAGE} on ${node_name} ..."
-  on_node build --quiet -t "${IMAGE}" "${REPOSITORY}"
+  on_node build --quiet --build-arg "REVISION=${revision}" -t "${IMAGE}" "${REPOSITORY}"
 fi
 
 # The folder is made by the Docker that was just asked for its ID, and handed to the user the app runs as.

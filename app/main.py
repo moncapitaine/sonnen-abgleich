@@ -20,6 +20,8 @@ from . import analysis, config, db, ingest, sync
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 STATIC = Path(__file__).parent / "static"
 SESSION_DAYS = 90
+STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+BUILD = {"revision": config.REVISION, "built_at": config.BUILT_AT, "started_at": STARTED_AT}
 
 
 @asynccontextmanager
@@ -67,7 +69,8 @@ class Login(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    # Public on purpose: lets anyone with the address check which build answers, nothing more.
+    return {"ok": True, **BUILD}
 
 
 @app.get("/api/session")
@@ -117,6 +120,7 @@ def overview():
         "hourly_from": analysis.local_iso(fine_from),
         "gaps": ds.gaps(),
         "counts": counts,
+        "build": BUILD,
         "sync": {
             "configured": sync.credentials_configured(), "enabled": config.SYNC_ENABLED,
             "time": config.SYNC_TIME, "running": sync.state["running"], "runs": runs,
@@ -367,4 +371,16 @@ def meter_change(body: MeterChange):
     return {"id": new_id}
 
 
-app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
+class UIFiles(StaticFiles):
+    """The UI has no versioned file names, so browsers must ask before reusing a stored copy.
+
+    'no-cache' still lets them keep the copy: the server answers 304 when nothing changed.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/", UIFiles(directory=STATIC, html=True), name="static")

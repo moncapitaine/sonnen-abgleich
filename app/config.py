@@ -43,3 +43,8 @@ APP_PASSWORD = _secret("APP_PASSWORD")
 SYNC_ENABLED = _flag("SYNC_ENABLED", True)
 # Local time of the daily download, HH:MM.
 SYNC_TIME = os.environ.get("SYNC_TIME", "04:20")
+
+# Which build is running: set in the image (Dockerfile), shown on the "Daten" page and in /api/health.
+REVISION = os.environ.get("APP_REVISION", "dev")
+_build_time = Path(__file__).resolve().parent.parent / "build_time"
+BUILT_AT = _build_time.read_text(encoding="utf-8").strip() if _build_time.is_file() else None

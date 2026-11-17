@@ -5,6 +5,11 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
+# When this code was built into an image, and which revision it is (deploy.sh passes a fingerprint of the code).
+# Both come after the code, so an unchanged checkout keeps its cached layers and its build time.
+RUN date -u +%Y-%m-%dT%H:%M:%SZ > /srv/build_time
+ARG REVISION=dev
+ENV APP_REVISION=$REVISION
 
 RUN useradd --uid 10001 --no-create-home appuser && mkdir -p /data && chown appuser /data
 USER appuser

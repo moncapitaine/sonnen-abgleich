@@ -83,11 +83,14 @@ function readColors() {
   };
 }
 const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+const PHONE = matchMedia('(max-width: 640px)');
+const narrow = () => PHONE.matches;
 
 // ---------- data ----------------------------------------------------------------
 async function loadData() {
   const [ov, t] = await Promise.all([api('/api/overview'), api('/api/daily')]);
   S.ov = ov;
+  S.rev ??= ov.build.revision;
   S.days = t.day.map((day, i) => {
     const d = {
       day, produced: t.produced[i], consumed: t.consumed[i], charged: t.bat_charged[i], discharged: t.bat_discharged[i],
@@ -336,7 +339,9 @@ function viewOverview() {
     card('Netzbezug pro Monat im Jahresvergleich', 'Von sonnen aufgezeichneter Strombezug aus dem Netz.', elCmp,
       hasGapMonth && h('div', { class: 'legendline' }, h('span', {}, 'Blasse Balken: Monat mit Datenlücke, tatsächlicher Bezug war höher.'))),
     card('Woher kam der verbrauchte Strom?', 'Monatlicher Verbrauch nach Quelle.', elSrc)));
-  const calCard = card('Kalender', 'Jeder Tag ein Feld – ungewöhnliche Tage fallen als dunkle Felder auf. Graue Felder: keine sonnen-Daten.', elCal);
+  elCal.style.minWidth = '720px';
+  const calCard = card('Kalender', 'Jeder Tag ein Feld – ungewöhnliche Tage fallen als dunkle Felder auf. Graue Felder: keine sonnen-Daten.'
+    + (narrow() ? ' Zur Seite wischen für das ganze Jahr.' : ''), h('div', { class: 'hscroll' }, elCal));
   $('header', calCard).append(metricSeg);
   out.push(calCard);
   queueMicrotask(() => { draw(elCmp, optCmp); draw(elSrc, optSrc); draw(elCal, optCal); });
@@ -406,7 +411,7 @@ function viewAnalysis() {
   const profile = card('Tagesverlauf', 'Durchschnittliche Leistung je Zeitabschnitt, drei Tage rund um den gewählten Tag.', elP,
     h('h3', { style: 'margin:14px 0 2px' }, 'Ladestand des Speichers'), elSoc);
   profile.id = 'profile';
-  $('header', profile).append(h('div', { class: 'row' },
+  $('header', profile).append(h('div', { class: 'row daynav' },
     h('button', { class: 'btn small', onclick: () => openDay(addDays(S.detailDay, -1), false) }, '‹ Tag zurück'),
     h('label', { class: 'field', style: 'width:150px' }, dayInput),
     h('button', { class: 'btn small', onclick: () => openDay(addDays(S.detailDay, 1), false) }, 'Tag vor ›')));
@@ -637,6 +642,10 @@ function viewMeter() {
   const I = cmp.intervals, t = cmp.total;
   const sgn = v => (v == null ? '–' : (v > 0 ? '+' : '') + n1.format(v));
   const period = i => `${dtShort(i.from)} – ${dtShort(i.to)}`;
+  // small four-column grid used inside the stacked entries on a phone; a cell is text or {text, cls}
+  const mini = (head, rows) => h('table', { class: 'mini' },
+    h('thead', {}, h('tr', {}, head.map(x => h('th', {}, x)))),
+    h('tbody', {}, rows.map(r => h('tr', {}, r.map(c => (c && typeof c === 'object' ? h('td', { class: c.cls }, c.text) : h('td', {}, c)))))));
   const badge = v => (v ? h('span', { class: 'badge ' + VERDICT[v][0] }, VERDICT[v][1]) : '');
   const devClass = (v, diff) => (!v || v === 'ok' || v === 'gap' ? '' : diff > 0 ? 'pos' : 'neg');
   if (!I.length) {
@@ -670,8 +679,20 @@ function viewMeter() {
         te ? { meter: te.meter, sonnen: te.sonnen, diff: te.diff, days: te.days, missing: te.missing_days, est: `0 – ${n0.format(te.est[1])} kWh` } : null)));
     out.push(h('div', { class: 'legendline', style: 'margin-top:-6px' }, h('span', {}, 'Grau: geschätzte Energie in Zeiten, in denen sonnen nichts aufgezeichnet hat (Annahme: Speicher aus, PV-Anlage lief).')));
 
+    const ivItems = () => h('div', { class: 'items' }, I.map(i => h('div', { class: 'item' },
+      h('div', { class: 'item-h' }, h('strong', {}, period(i)), h('span', { class: 'muted' }, `${n1.format(i.days)} Tage`)),
+      mini(['', 'Zähler', 'sonnen', 'Abweichung'], [
+        ['1.8.0', n1.format(i.meter_import), n1.format(i.sonnen_import) + (i.approx ? ' ≈' : ''), { text: sgn(i.diff_import), cls: devClass(i.verdict, i.diff_import) }],
+        ['2.8.0', i.meter_export == null ? '–' : n1.format(i.meter_export), n1.format(i.sonnen_export), { text: sgn(i.diff_export), cls: devClass(i.verdict_export, i.diff_export) }]]),
+      h('div', { class: 'verdicts' }, h('div', {}, h('span', { class: 'muted' }, '1.8.0'), badge(i.verdict)),
+        i.verdict_export && h('div', {}, h('span', { class: 'muted' }, '2.8.0'), badge(i.verdict_export))),
+      i.missing_days > 0.02 && h('div', { class: 'muted small' }, `${n1.format(i.missing_days)} Tage ohne sonnen-Daten in diesem Zeitraum`))),
+    h('div', { class: 'item sum' }, h('div', { class: 'item-h' }, h('strong', {}, 'Summe'), h('span', { class: 'muted' }, `${n1.format(t.days)} Tage`)),
+      mini(['', 'Zähler', 'sonnen', 'Abweichung'], [
+        ['1.8.0', n1.format(t.meter_import), n1.format(t.sonnen_import), sgn(t.diff_import)],
+        ['2.8.0', te ? n1.format(te.meter) : '–', te ? n1.format(te.sonnen) : '–', te ? sgn(te.diff) : '–']])));
     out.push(card('Abweichung je Ablesezeitraum', 'Positive Abweichung: Der Zähler hat mehr gezählt, als sonnen aufgezeichnet hat. Alle Werte in kWh.',
-      h('div', { class: 'tablewrap' }, h('table', {},
+      narrow() ? ivItems() : h('div', { class: 'tablewrap' }, h('table', {},
         h('thead', {},
           h('tr', {}, h('th', { rowspan: 2 }, 'Zeitraum'), h('th', { rowspan: 2 }, 'Tage'), h('th', { colspan: 4, class: 'grp' }, '1.8.0 – Bezug'), h('th', { colspan: 4, class: 'grp' }, '2.8.0 – Einspeisung'), h('th', { rowspan: 2 }, 'Tage ohne Daten')),
           h('tr', {}, ['Zähler', 'sonnen', 'Abweichung', 'Bewertung', 'Zähler', 'sonnen', 'Abweichung', 'Bewertung'].map((x, i) => h('th', { class: (i % 4 === 3 ? 'l' : '') + (i % 4 === 0 ? ' grp' : '') }, x)))),
@@ -698,9 +719,25 @@ function viewMeter() {
   const KIND = { install: 'Anfangsstand', removal: 'Endstand', reading: '' };
   const byReading = new Map(I.map(i => [i.reading_id, i]));
   const kw = v => (v == null ? '–' : nf(1).format(v));
+  const actions = (m, r) => h('div', { class: 'row', style: 'justify-content:flex-end;flex-wrap:nowrap' },
+    h('button', { class: 'btn small', onclick: () => dlgEditReading(m, r) }, 'Ändern'),
+    h('button', { class: 'btn small danger', onclick: async () => {
+      if (!confirm(`Ablesung vom ${dtDE(r.taken_local)} löschen?`)) return;
+      try { await api(`/api/readings/${r.id}`, { method: 'DELETE' }); await refreshMeter(); } catch (ex) { toast(ex.message); }
+    } }, 'Löschen'));
+  const remark = r => [KIND[r.kind], r.note].filter(Boolean).filter((x, k, a) => a.indexOf(x) === k).join(' · ');
+  const readingItems = m => h('div', { class: 'items' }, [...m.readings].reverse().map(r => {
+    const i = byReading.get(r.id);
+    return h('div', { class: 'item' },
+      h('div', { class: 'item-h' }, h('strong', {}, dtDE(r.taken_local)), remark(r) && h('span', { class: 'muted' }, remark(r))),
+      mini(['', 'Zählerstand', 'erwartet', 'Abweichung'], [
+        ['1.8.0', kw(r.import_kwh), i ? kw(i.expected_import) : '–', { text: i ? sgn(i.diff_import) : '–', cls: i ? devClass(i.verdict, i.diff_import) : '' }],
+        ['2.8.0', kw(r.export_kwh), i ? kw(i.expected_export) : '–', { text: i ? sgn(i.diff_export) : '–', cls: i ? devClass(i.verdict_export, i.diff_export) : '' }]]),
+      actions(m, r));
+  }), h('div', { class: 'legendline' }, h('span', {}, '„Erwartet“ = vorherige Ablesung plus das, was sonnen seitdem aufgezeichnet hat.')));
   for (const m of [...cmp.meters].reverse()) {
     const c = card(`Zähler ${m.number}`, [m.label, m.installed_local && `eingebaut ${dtDE(m.installed_local)}`, m.removed_local ? `ausgebaut ${dtDE(m.removed_local)}` : 'in Betrieb', m.note].filter(Boolean).join(' · '),
-      m.readings.length ? h('div', { class: 'tablewrap' }, h('table', {},
+      m.readings.length ? narrow() ? readingItems(m) : h('div', { class: 'tablewrap' }, h('table', {},
         h('thead', {},
           h('tr', {}, h('th', { rowspan: 2 }, 'Abgelesen am'), h('th', { colspan: 3, class: 'grp' }, '1.8.0 – Bezug (kWh)'), h('th', { colspan: 3, class: 'grp' }, '2.8.0 – Einspeisung (kWh)'), h('th', { rowspan: 2, class: 'l' }, 'Notiz'), h('th', { rowspan: 2 })),
           h('tr', {}, ['Zählerstand', 'erwartet', 'Abweichung', 'Zählerstand', 'erwartet', 'Abweichung'].map((x, i) => h('th', { class: i % 3 === 0 ? 'grp' : '' }, x)))),
@@ -712,13 +749,8 @@ function viewMeter() {
             h('td', { class: i ? devClass(i.verdict, i.diff_import) : '', title: i ? VERDICT[i.verdict][1] : '' }, i ? sgn(i.diff_import) : '–'),
             h('td', { class: 'grp' }, kw(r.export_kwh)), h('td', {}, i ? kw(i.expected_export) : '–'),
             h('td', { class: i ? devClass(i.verdict_export, i.diff_export) : '', title: i && i.verdict_export ? VERDICT[i.verdict_export][1] : '' }, i ? sgn(i.diff_export) : '–'),
-            h('td', { class: 'l wrap' }, [KIND[r.kind], r.note].filter(Boolean).filter((x, k, a) => a.indexOf(x) === k).join(' · ')),
-            h('td', {}, h('div', { class: 'row', style: 'justify-content:flex-end;flex-wrap:nowrap' },
-              h('button', { class: 'btn small', onclick: () => dlgEditReading(m, r) }, 'Ändern'),
-              h('button', { class: 'btn small danger', onclick: async () => {
-                if (!confirm(`Ablesung vom ${dtDE(r.taken_local)} löschen?`)) return;
-                try { await api(`/api/readings/${r.id}`, { method: 'DELETE' }); await refreshMeter(); } catch (ex) { toast(ex.message); }
-              } }, 'Löschen'))));
+            h('td', { class: 'l wrap' }, remark(r)),
+            h('td', {}, actions(m, r)));
         }))),
       h('div', { class: 'legendline' }, h('span', {}, '„Erwartet“ = vorherige Ablesung plus das, was sonnen seitdem aufgezeichnet hat. Abweichung = Zählerstand minus erwartet.')))
         : h('p', { class: 'empty' }, 'Noch keine Ablesung für diesen Zähler.'));
@@ -767,6 +799,12 @@ function viewData() {
       h('thead', {}, h('tr', {}, ['Zeit ohne sonnen-Daten', 'fehlende Tage', 'geschätzter Netzbezug (kWh)', 'Schätzgrundlage'].map((x, i) => h('th', { class: i === 3 ? 'l' : '' }, x)))),
       h('tbody', {}, ov.gaps.map(g => h('tr', {}, h('td', {}, g.from === g.to ? dDE(g.from) : `${dDE(g.from)} – ${dDE(g.to)}`), h('td', {}, num(g.missing_days, 1)),
         h('td', {}, `${n0.format(g.est_kwh.imp_lo)} – ${n0.format(g.est_kwh.imp_hi)}`), h('td', { class: 'l' }, g.reference)))))) : null));
+  const b = ov.build;
+  out.push(card('Programmversion', 'Welche Version gerade auf dem Server läuft. Die Kennung ist ein Fingerabdruck des Programmcodes und stimmt mit dem Namen des Docker-Images überein.',
+    h('div', { class: 'tiles' },
+      tile('Gebaut am', b.built_at ? dtDE(localIso(b.built_at)) : '–', null, b.built_at ? 'Zeitpunkt, zu dem das Image erstellt wurde' : 'nicht aus einem Image gestartet'),
+      tile('Kennung', b.revision, null, b.revision === 'dev' ? 'lokaler Entwicklungsstand' : `Image …:${b.revision}`),
+      tile('Gestartet am', dtDE(localIso(b.started_at)), null, 'letzter Start des Servers'))));
   return out;
 }
 const localIso = utc => { const d = new Date(utc); return `${isoDay(d)}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
@@ -814,6 +852,11 @@ async function render() {
   const keep = window.scrollY;
   disposeCharts();
   const view = { overview: viewOverview, analysis: viewAnalysis, meter: viewMeter, data: viewData }[S.tab]();
+  if (S.stale) {
+    view.unshift(h('div', { class: 'notice' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '!'),
+      h('div', { class: 'row', style: 'flex:1;justify-content:space-between' }, h('p', {}, h('strong', {}, 'Auf dem Server läuft eine neuere Version. '), 'Diese Seite zeigt noch die alte.'),
+        h('button', { class: 'btn small', onclick: () => location.reload() }, 'Neu laden'))));
+  }
   $('#view').replaceChildren(...view.filter(Boolean));
   window.scrollTo(0, keep);
 }
@@ -842,7 +885,23 @@ $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
   if (!b) return;
   S.tab = b.dataset.tab; history.replaceState(null, '', '#' + S.tab); window.scrollTo(0, 0); render();
+  try { localStorage.setItem('tab', S.tab); } catch { /* private mode */ }
 });
-if (['overview', 'analysis', 'meter', 'data'].includes(location.hash.slice(1))) S.tab = location.hash.slice(1);
+// Open where the person left off (on a phone that is usually the meter page); a link with #... wins.
+const TABS = ['overview', 'analysis', 'meter', 'data'];
+try { if (TABS.includes(localStorage.getItem('tab'))) S.tab = localStorage.getItem('tab'); } catch { /* private mode */ }
+if (TABS.includes(location.hash.slice(1))) S.tab = location.hash.slice(1);
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render());
+PHONE.addEventListener('change', () => { if (S.days.length || S.cmp) render(); });
+// A tab that stays open across an update keeps running the old script: notice it when the tab is looked at again.
+async function checkVersion() {
+  if (!S.rev || S.stale || document.hidden) return;
+  try {
+    const r = await (await fetch('/api/health', { cache: 'no-store' })).json();
+    if (r.revision && r.revision !== S.rev) { S.stale = true; render(); }
+  } catch { /* offline or restarting: ask again next time */ }
+}
+document.addEventListener('visibilitychange', checkVersion);
+window.addEventListener('focus', checkVersion);
+setInterval(checkVersion, 10 * 60 * 1000);
 start().catch(ex => { if (ex.message !== 'Bitte anmelden.') $('#view').replaceChildren(h('div', { class: 'card err' }, 'Fehler beim Laden: ' + ex.message)); });
