@@ -144,3 +144,10 @@ app/db.py             SQLite schema
 app/static/           UI (plain JS + ECharts, no build step)
 tests/                pytest
 ```
+
+## License
+
+Copyright 2026 Michael Vogt. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+`app/static/vendor/echarts.min.js` is [Apache ECharts](https://echarts.apache.org/), also under
+the Apache License 2.0.
