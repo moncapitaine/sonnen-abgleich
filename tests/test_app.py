@@ -282,3 +282,7 @@ def test_costs_follow_the_official_meter_when_readings_exist(client):
     assert p["annual_kwh"] == pytest.approx(4818) and p["annual_kwh_rounded"] == 4850
     assert p["monthly_payment"] == 132                                  # (120 + 4850 * 0.30) / 12 = 131.25
     assert p["actual"]["kwh"] == pytest.approx(4818)                    # no outage here, so the same
+    # the per-day series behind the overview adds up to the monthly figures
+    june_days = [(k, e) for day, k, e in zip(c["days"]["day"], c["days"]["kwh"], c["days"]["eur"]) if day.startswith("2025-06")]
+    assert sum(k for k, _ in june_days) == pytest.approx(396, abs=0.01)
+    assert sum(e for _, e in june_days) == pytest.approx(june["total_eur"], abs=0.01)

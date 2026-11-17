@@ -238,7 +238,8 @@ function tile(label, value, unit, note, color) {
 
 // ---------- shared: gap notices -----------------------------------------------------
 function gapNotices() {
-  return (S.ov.gaps || []).filter(g => g.missing_days >= 0.5).map(g => {
+  // only gaps that fall into the chosen period: a warning about 2026 has no place in a view of 2025
+  return (S.ov.gaps || []).filter(g => g.missing_days >= 0.5 && g.to >= S.from && g.from <= S.to).map(g => {
     const e = g.est_kwh;
     return h('div', { class: 'notice' }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '!'), h('div', {},
       h('p', {}, h('strong', {}, `sonnen hat vom ${dDE(g.from)} bis ${dDE(g.to)} nichts aufgezeichnet `),
@@ -256,8 +257,40 @@ function viewOverview() {
   const months = aggregate(days, 'month');
   const out = [...gapNotices()];
 
+  // cost of the chosen period, from the per-day series of the cost page
+  const K = S.costs, kd = K && K.days, prop = K && K.proposal;
+  const goCost = () => { S.tab = 'cost'; history.replaceState(null, '', '#cost'); window.scrollTo(0, 0); render(); };
+  const linked = el => { el.classList.add('clickable'); el.tabIndex = 0; el.setAttribute('role', 'link'); el.onclick = goCost; el.onkeydown = e => { if (e.key === 'Enter') goCost(); }; return el; };
+  let costTiles = [], costCard = null;
+  if (prop && kd) {
+    const cm = new Map();
+    let sumEur = 0, sumKwh = 0, sumKnown = 0, nDays = 0;
+    kd.day.forEach((day, i) => {
+      if (day < S.from || day > S.to) return;
+      sumEur += kd.eur[i]; sumKwh += kd.kwh[i]; sumKnown += kd.known_kwh[i]; nDays++;
+      const key = day.slice(0, 7);
+      const m = cm.get(key) || { month: key, days: 0, kwh: 0, known_kwh: 0, total_eur: 0 };
+      m.days++; m.kwh += kd.kwh[i]; m.known_kwh += kd.known_kwh[i]; m.total_eur += kd.eur[i];
+      cm.set(key, m);
+    });
+    const cMonths = [...cm.values()];
+    for (const m of cMonths) m.complete = m.days === new Date(+m.month.slice(0, 4), +m.month.slice(5), 0).getDate();
+    const byMeter = sumKnown > 0;
+    costTiles = [
+      linked(tile('Stromkosten', n0.format(sumEur), '€', `${n0.format(sumEur / Math.max(1, nDays) * 30.44)} € pro Monat · ${n0.format(sumKwh)} kWh ${byMeter ? 'laut Zähler' : 'nach sonnen-Daten'}`)),
+      linked(tile('Abschlag-Vorschlag', n0.format(prop.monthly_payment), '€ pro Monat', `${n0.format(prop.annual_kwh_rounded)} kWh pro Jahr melden`)),
+    ];
+    if (cMonths.length > 1) {
+      costCard = card('Stromkosten pro Monat', (byMeter ? 'So wie der offizielle Zähler zählt. ' : '') + 'Die Linie ist der vorgeschlagene Abschlag; Einzelheiten unter „Kosten“.',
+        costChart(cMonths, prop.monthly_payment, byMeter));
+    }
+  } else if (K) {
+    costTiles = [linked(tile('Stromkosten', '–', null, 'Vertragspreise unter „Kosten“ eintragen'))];
+  }
+
   out.push(h('div', { class: 'tiles' },
     tile('Netzbezug', kwh(t.purchase), 'kWh', `${num(t.purchase / 1000 / Math.max(1, t.n - t.missing), 1)} kWh pro Tag`, C.grid),
+    ...costTiles,
     tile('Einspeisung', kwh(t.feedin), 'kWh', null, C.feedin),
     tile('Erzeugung', kwh(t.produced), 'kWh', null, C.pv),
     tile('Verbrauch', kwh(t.consumed), 'kWh', `${num(t.consumed / 1000 / Math.max(1, t.n - t.missing), 1)} kWh pro Tag`, C.load),
@@ -342,6 +375,7 @@ function viewOverview() {
       hasGapMonth && h('div', { class: 'legendline' }, h('span', {}, 'Blasse Balken: Monat mit Datenlücke, tatsächlicher Bezug war höher.'))),
     card('Woher kam der verbrauchte Strom?', 'Monatlicher Verbrauch nach Quelle.', elSrc)));
   elCal.style.minWidth = '720px';
+  if (costCard) out.push(costCard);
   const calCard = card('Kalender', 'Jeder Tag ein Feld – ungewöhnliche Tage fallen als dunkle Felder auf. Graue Felder: keine sonnen-Daten.'
     + (narrow() ? ' Zur Seite wischen für das ganze Jahr.' : ''), h('div', { class: 'hscroll' }, elCal));
   $('header', calCard).append(metricSeg);
@@ -511,7 +545,7 @@ function dialog(title, sub, fields, submitLabel, onSubmit) {
   };
   dlg.showModal();
 }
-async function refreshMeter() { S.cmp = await api('/api/comparison'); render(); }
+async function refreshMeter() { S.costs = null; S.cmp = await api('/api/comparison'); render(); }
 
 function dlgNewMeter() {
   const n = nowLocal();
@@ -806,6 +840,29 @@ function viewMeter() {
 }
 
 // ---------- cost and advance payment ----------------------------------------------------
+/** Bar chart of monthly cost with the advance payment as a line. Used on the cost page and the overview. */
+function costChart(M, payment, hasReadings) {
+  const share = m => (m.kwh > 0 ? m.known_kwh / m.kwh : 0);
+  const B = M.map(m => ({
+    label: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(2, 4)}`, title: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(0, 4)}` + (m.complete ? '' : ' (angebrochen)'),
+    n: m.days, missing: 0, sonnen: m.sonnen_days > 0 ? m.sonnen_eur : null,
+  }));
+  const el = h('div', { class: 'chart tall' });
+  const o = baseOpt(hasReadings);
+  const fade = (m, v) => (m.complete ? v : { value: v, itemStyle: { opacity: 0.45 } });
+  o.xAxis = axCat(B.map(b => b.label)); o.yAxis = axVal('€');
+  o.tooltip.formatter = params => tip(B, '€', hasReadings ? 'zusammen' : null)(params)
+    + (hasReadings && B[params[0].dataIndex].sonnen != null ? `<div style="color:${C.muted};margin-top:4px">nur nach sonnen-Daten: ${nf(2).format(B[params[0].dataIndex].sonnen)} €</div>` : '');
+  const line = payment == null ? undefined : { silent: true, symbol: 'none', lineStyle: { color: C.text2, width: 1.5, type: 'solid' },
+    label: { formatter: `Abschlag ${n0.format(payment)} €`, position: 'insideEndTop', color: C.text, fontSize: 11 }, data: [{ yAxis: payment }] };
+  o.series = hasReadings ? [
+    { ...barSeries('durch Zählerablesung belegt', C.meter, M.map(m => fade(m, m.total_eur * share(m))), 's'), markLine: line },
+    barSeries('geschätzt (keine Ablesung)', C.est, M.map(m => fade(m, m.total_eur * (1 - share(m)))), 's', true),
+  ] : [{ ...barSeries('Kosten', C.grid, M.map(m => fade(m, m.total_eur)), 's', true), markLine: line }];
+  queueMicrotask(() => draw(el, o));
+  return el;
+}
+
 function viewCost() {
   const c = S.costs, out = [];
   const cur = c.tariffs[c.tariffs.length - 1];
@@ -869,29 +926,12 @@ function viewCost() {
 
   // monthly cost, as billed
   const all = c.months, M = all.slice(-24);
-  const share = m => (m.kwh > 0 ? m.known_kwh / m.kwh : m.known_days / Math.max(1, m.days));
-  const B = M.map(m => ({
-    label: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(2, 4)}`, title: `${MONTHS[+m.month.slice(5) - 1]} ${m.month.slice(0, 4)}` + (m.complete ? '' : ' (angebrochen)'),
-    n: m.days, missing: 0, sonnen: m.sonnen_days > 0 ? m.sonnen_eur : null,
-  }));
-  const el = h('div', { class: 'chart tall' });
-  const o = baseOpt(hasReadings);
-  const fade = (m, v) => (m.complete ? v : { value: v, itemStyle: { opacity: 0.45 } });
-  o.xAxis = axCat(B.map(b => b.label)); o.yAxis = axVal('€');
-  o.tooltip.formatter = params => tip(B, '€', hasReadings ? 'zusammen' : null)(params)
-    + (hasReadings && B[params[0].dataIndex].sonnen != null ? `<div style="color:${C.muted};margin-top:4px">nur nach sonnen-Daten: ${nf(2).format(B[params[0].dataIndex].sonnen)} €</div>` : '');
-  const line = { silent: true, symbol: 'none', lineStyle: { color: C.text2, width: 1.5, type: 'solid' },
-    label: { formatter: `Abschlag ${n0.format(p.monthly_payment)} €`, position: 'insideEndTop', color: C.text, fontSize: 11 }, data: [{ yAxis: p.monthly_payment }] };
-  o.series = hasReadings ? [
-    { ...barSeries('durch Zählerablesung belegt', C.meter, M.map(m => fade(m, m.total_eur * share(m))), 's'), markLine: line },
-    barSeries('geschätzt (keine Ablesung)', C.est, M.map(m => fade(m, m.total_eur * (1 - share(m)))), 's', true),
-  ] : [{ ...barSeries('Kosten', C.grid, M.map(m => fade(m, m.total_eur)), 's', true), markLine: line }];
+  const el = costChart(M, p.monthly_payment, hasReadings);
   out.push(card('Stromkosten pro Monat', (hasReadings ? 'So wie der offizielle Zähler zählt: ' : '') + 'Grundpreis plus Verbrauch mal Arbeitspreis. Im Winter liegen die Kosten über dem Abschlag, im Sommer darunter – übers Jahr gleicht es sich aus.', el,
     h('div', { class: 'legendline' },
       hasReadings && h('span', {}, 'Zwischen zwei Ablesungen ist der Verbrauch genau bekannt und wird nach dem Verlauf der sonnen-Daten auf die Tage verteilt.'),
       !hasReadings && all.some(m => m.sonnen_missing_days > 0.5) && h('span', {}, 'Für Zeit ohne sonnen-Aufzeichnung ist ein Schätzwert enthalten (Annahme: Speicher aus, PV-Anlage lief).'),
       M.some(m => !m.complete) && h('span', {}, 'Blass: angebrochener Monat.'))));
-  queueMicrotask(() => draw(el, o));
 
   const diff = v => (v > 0 ? '+' : '') + nf(2).format(v) + ' €';
   const basis = x => {
@@ -1024,7 +1064,7 @@ async function render() {
   $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === S.tab));
   renderFilters();
   if (S.tab === 'meter' && !S.cmp) S.cmp = await api('/api/comparison');
-  if (S.tab === 'cost' && !S.costs) S.costs = await api('/api/costs');
+  if ((S.tab === 'cost' || S.tab === 'overview') && !S.costs) S.costs = await api('/api/costs');
   const keep = window.scrollY;
   disposeCharts();
   const view = { overview: viewOverview, analysis: viewAnalysis, meter: viewMeter, cost: viewCost, data: viewData }[S.tab]();

@@ -491,12 +491,17 @@ def costs(conn, ds: Dataset) -> dict:
                 "sonnen_days": 0.0, "sonnen_missing_days": 0.0, "kwh_sonnen_days": 0.0}
 
     months: dict[str, dict] = {}
+    per_day = {"day": [], "kwh": [], "known_kwh": [], "eur": []}   # lets the UI sum any date range
     for d, b in billed.items():
         t = tariff_for(d)
         price = t["price_ct_kwh"] / 100
         base = t["base_eur_month"] / calendar.monthrange(d.year, d.month)[1]
         m = months.setdefault(d.isoformat()[:7], blank(d.isoformat()[:7], "month"))
         kwh = b["known"] + b["est"]
+        per_day["day"].append(d.isoformat())
+        per_day["kwh"].append(round(kwh, 3))
+        per_day["known_kwh"].append(round(b["known"], 3))
+        per_day["eur"].append(round(kwh * price + base, 4))
         m["days"] += 1
         m["kwh"] += kwh
         m["known_kwh"] += b["known"]
@@ -528,6 +533,7 @@ def costs(conn, ds: Dataset) -> dict:
 
     def tidy(item: dict) -> dict:
         return {k: round(v, 2) if isinstance(v, float) else v for k, v in item.items()}
+    out["days"] = per_day
     out["months"] = [tidy(m) for m in months.values()]
     out["years"] = [tidy(y) for y in years.values()]
 
